@@ -18,6 +18,18 @@
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta'
 
+/**
+ * GEMINI_BASE_URL — обход гео-блока: адрес релея в поддерживаемом регионе
+ * (например, бесплатный Cloudflare Worker, форвардер на Google).
+ * Значение должно включать /v1beta, пример:
+ *   GEMINI_BASE_URL=https://имя.аккаунт.workers.dev/v1beta
+ * Ключ по-прежнему хранится только на нашем сервере и идёт в запросе.
+ */
+function getGeminiBase(): string {
+  const base = process.env.GEMINI_BASE_URL?.trim()
+  return base ? base.replace(/\/+$/, '') : GEMINI_BASE
+}
+
 export function getGeminiKey(): string | null {
   const key = process.env.GEMINI_API_KEY?.trim()
   return key ? key : null
@@ -92,7 +104,7 @@ export async function createGeminiStream(options: GeminiStreamOptions): Promise<
   }
 
   const res = await fetch(
-    `${GEMINI_BASE}/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(options.apiKey)}`,
+    `${getGeminiBase()}/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(options.apiKey)}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
