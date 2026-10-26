@@ -16,26 +16,25 @@ interface UseTtsQueueOptions {
 type Emotion = 'neutral' | 'excited' | 'question' | 'sympathy' | 'thoughtful'
 
 /**
- * Эмоциональные профили серверного нейроголоса: множитель скорости
- * воспроизведения. Изменение playbackRate сдвигает и темп, и высоту тона —
- * это даёт естественную живую просодию (радость бодрее и выше, сочувствие
- * мягче и ниже).
+ * Эмоциональные профили серверного нейроголоса (Edge SvetlanaNeural):
+ * абсолютные значения скорости (%) и высоты тона (Гц) для SSML-просодии.
+ * Просодия на стороне синтеза звучит естественно, в отличие от смены playbackRate.
  */
-const SERVER_EMOTION_RATE: Record<Emotion, number> = {
-  neutral: 1.0,
-  excited: 1.08,
-  question: 1.03,
-  sympathy: 0.92,
-  thoughtful: 0.9,
+const SERVER_EMOTION_PROSODY: Record<Emotion, { rate: number; pitch: number }> = {
+  neutral: { rate: 12, pitch: 2 },
+  excited: { rate: 20, pitch: 12 },
+  question: { rate: 14, pitch: 8 },
+  sympathy: { rate: 8, pitch: -6 },
+  thoughtful: { rate: 7, pitch: -8 },
 }
 
-/** Эмоциональные профили системного синтеза (fallback) */
+/** Эмоциональные профили системного синтеза (fallback) — темп повышен, паузы короче */
 const BROWSER_EMOTION_PROFILE: Record<Emotion, { pitch: number; rate: number; pause: number }> = {
-  neutral: { pitch: 1.0, rate: 1.0, pause: 160 },
-  excited: { pitch: 1.15, rate: 1.06, pause: 230 },
-  question: { pitch: 1.07, rate: 0.98, pause: 300 },
-  sympathy: { pitch: 0.93, rate: 0.9, pause: 340 },
-  thoughtful: { pitch: 0.97, rate: 0.93, pause: 400 },
+  neutral: { pitch: 1.0, rate: 1.12, pause: 100 },
+  excited: { pitch: 1.15, rate: 1.2, pause: 140 },
+  question: { pitch: 1.07, rate: 1.1, pause: 170 },
+  sympathy: { pitch: 0.93, rate: 0.98, pause: 220 },
+  thoughtful: { pitch: 0.97, rate: 0.96, pause: 240 },
 }
 
 const EXCITED_RE =
@@ -52,8 +51,9 @@ const PUMP_TICK_MS = 80
 const SENTENCE_END = /[.!?…]$/
 /** Ждём появления системных голосов перед fallback-озвучкой */
 const VOICES_WAIT_MS = 1500
-/** Мягкий лимит длины фразы: Google TTS режет по ~200 символов */
-const MAX_SENTENCE_CHARS = 185
+/** Мягкий лимит длины фразы: Edge Neural спокойно тянет длинные фрагменты,
+ * а меньше кусков — меньше технических пауз между ними */
+const MAX_SENTENCE_CHARS = 260
 /** Сколько серверных неудач подряд переводят голос в cooldown */
 const SERVER_FAIL_THRESHOLD = 2
 /** Длительность cooldown серверного голоса после неудач */
@@ -244,7 +244,7 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
     }
   }
 
-  /** Проигрываем MP3 с сервера с эмоциональным playbackRate */
+  /** Проигрываем MP3 с сервера (просодия эмоций уже в SSML на сервере) */
   const playServerAudio = useCallback(
     async (bytes: ArrayBuffer, sentence: string, generation: number): Promise<void> => {
       const ctx = ensureCtx()
@@ -263,17 +263,12 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
       const buffer = await ctx.decodeAudioData(bytes)
       if (generation !== generationRef.current) return
 
-      const emotion = detectEmotion(sentence)
-      const genderFactor = optsRef.current.gender === 'male' ? 0.92 : 1.0
-      const playbackRate = clamp(
-        SERVER_EMOTION_RATE[emotion] * genderFactor * jitter(sentence, 0.02),
-        0.5,
-        1.6
-      )
       return new Promise<void>((resolve) => {
         const source = ctx.createBufferSource()
         source.buffer = buffer
-        source.playbackRate.value = playbackRate
+        // Просодия эмоций теперь считается на сервере (SSML) — здесь только
+        // лёгкий детерминированный джиттер, чтобы голос звучал живее
+        source.playbackRate.value = clamp(jitter(sentence, 0.02), 0.9, 1.1)
         sourceRef.current = source
         let settled = false
         const finishOnce = () => {
@@ -292,7 +287,7 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
             /* ignore */
           }
           finishOnce()
-        }, (buffer.duration / Math.max(playbackRate, 0.5)) * 1000 + 4000)
+        }, (buffer.duration / 0.9) * 1000 + 4000)
         source.onended = finishOnce
         source.connect(ctx.destination)
         source.start()
@@ -355,6 +350,9 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
 
       const cooldownActive = Date.now() < serverCooldownUntilRef.current
       if (!cooldownActive) {
+        // Просодия эмоций считается на сервере и попадает в ключ кэша
+        const emotion = detectEmotion(clean)
+        const prosody = SERVER_EMOTION_PROSODY[emotion]
         // Таймаут fetch: подвисший запрос не должен блокировать очередь озвучки
         const controller = new AbortController()
         const fetchTimeout = setTimeout(() => controller.abort(), 10_000)
@@ -362,7 +360,11 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
           const res = await fetch('/api/tts', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: clean.slice(0, 800) }),
+            body: JSON.stringify({
+              text: clean.slice(0, 800),
+              rate: prosody.rate,
+              pitch: prosody.pitch,
+            }),
             signal: controller.signal,
           })
           if (!res.ok) throw new Error(`TTS ${res.status}`)
@@ -411,13 +413,13 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
           await speakSentence(sentence, generation)
           if (generation !== generationRef.current) return
 
-          // Живая пауза между фразами (зависит от эмоции и финального знака)
+          // Живая пауза между фразами (короче — разговор бодрее)
           const hasMore =
             queueRef.current.length > 0 || !streamEndedRef.current || pendingRef.current.length > 0
           if (hasMore) {
             const clean = cleanForSpeech(sentence) || sentence
             const prof = BROWSER_EMOTION_PROFILE[detectEmotion(clean)]
-            const tail = /[…]$/.test(clean) ? 160 : 0
+            const tail = /[…]$/.test(clean) ? 120 : 0
             await sleep(prof.pause + tail)
           }
         }

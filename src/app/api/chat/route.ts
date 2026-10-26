@@ -10,12 +10,24 @@ interface ChatRequestBody {
   search?: boolean
 }
 
-const HISTORY_LIMIT = 12
+const HISTORY_LIMIT = 8
 const MEMORY_LIMIT = 15
-/** Обрезка длинных реплик в истории — экономим токены и лимиты API */
-const HISTORY_MSG_MAX = 500
+/** Обрезка длинных реплик в истории — экономим токены и ускоряем ответ */
+const HISTORY_MSG_MAX = 280
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** Кэш SDK-клиента: ZAI.create() тяжёлый, переиспользуем между запросами */
+let zaiPromise: ReturnType<typeof ZAI.create> | null = null
+function getZai() {
+  if (!zaiPromise) {
+    zaiPromise = ZAI.create().catch((error) => {
+      zaiPromise = null
+      throw error
+    })
+  }
+  return zaiPromise
+}
 
 /** Гварды частоты фоновых LLM-вызовов — бережём rate-limit API */
 let lastExtractAt = 0
@@ -43,7 +55,7 @@ async function extractMemoriesInBackground(userText: string): Promise<void> {
   if (now - lastExtractAt < EXTRACT_MIN_INTERVAL) return
   lastExtractAt = now
   try {
-    const zai = await ZAI.create()
+    const zai = await getZai()
     const res = await zai.chat.completions.create({
       messages: [
         {
@@ -93,7 +105,7 @@ async function updateDiaryInBackground(
   try {
     const day = todayDay()
     const existing = await db.diaryEntry.findUnique({ where: { day } })
-    const zai = await ZAI.create()
+    const zai = await getZai()
     const res = await zai.chat.completions.create({
       messages: [
         {
@@ -130,7 +142,7 @@ async function updateDiaryInBackground(
 /** Поиск в интернете через встроенную функцию SDK */
 async function webSearchContext(query: string): Promise<string | null> {
   try {
-    const zai = await ZAI.create()
+    const zai = await getZai()
     const results = await zai.functions.invoke('web_search', {
       query: query.slice(0, 200),
       num: 5,
@@ -208,7 +220,7 @@ export async function POST(req: NextRequest) {
       }
     }
     systemParts.push(
-      'Стиль речи для озвучивания: говори живым разговорным языком, короткими фразами; эмоции передавай словами и восклицаниями (междометия вроде «Ой», «Ух ты», «Хм» — умеренно); никаких markdown, эмодзи, списков и символов — всё будет произнесено вслух.'
+      'Стиль речи для озвучивания: говори живым разговорным языком, короткими фразами; отвечай бодро и компактно — обычно 1-3 коротких предложения, без вводных фраз вроде «Конечно, я расскажу»; эмоции передавай словами и восклицаниями (междометия вроде «Ой», «Ух ты», «Хм» — умеренно); никаких markdown, эмодзи, списков и символов — всё будет произнесено вслух.'
     )
     systemParts.push(
       'Сегодняшняя дата: ' +
@@ -227,8 +239,8 @@ export async function POST(req: NextRequest) {
         })),
     ]
 
-    const zai = await ZAI.create()
-    // До 3 попыток с паузой: при частой переписке API иногда отдаёт 429
+    const zai = await getZai()
+    // До 3 попыток с короткой паузой: при частой переписке API иногда отдаёт 429
     let upstream: Awaited<ReturnType<typeof zai.chat.completions.create>> | null = null
     let lastChatError: unknown = null
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -245,7 +257,7 @@ export async function POST(req: NextRequest) {
         const message = error instanceof Error ? error.message : String(error)
         const isRateLimit = message.includes('429') || message.toLowerCase().includes('too many')
         if (!isRateLimit || attempt === 2) break
-        await sleep(3000 * (attempt + 1))
+        await sleep(1200 * (attempt + 1))
       }
     }
     if (!upstream) {

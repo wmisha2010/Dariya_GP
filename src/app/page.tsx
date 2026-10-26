@@ -6,7 +6,6 @@ import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/hooks/use-toast'
 import { useSpeechRecognition } from '@/hooks/use-speech-recognition'
 import { useTtsQueue } from '@/hooks/use-tts-queue'
-import { CharacterSwitcher } from '@/components/daria/character-switcher'
 import { ChatPanel } from '@/components/daria/chat-panel'
 import { MemoryDialog } from '@/components/daria/memory-dialog'
 import { VoiceOrb } from '@/components/daria/voice-orb'
@@ -17,6 +16,8 @@ import {
   Globe,
   Mic,
   MicOff,
+  PanelRightClose,
+  PanelRightOpen,
   SendHorizontal,
   Sparkles,
   Square,
@@ -54,6 +55,8 @@ export default function Home() {
   const [searchOn, setSearchOn] = useState(false)
   const [voiceOn, setVoiceOn] = useState(true)
   const [memoryOpen, setMemoryOpen] = useState(false)
+  /** Панель диалога скрыта/показана */
+  const [chatOpen, setChatOpen] = useState(true)
 
   // Ввод
   const [inputValue, setInputValue] = useState('')
@@ -307,19 +310,6 @@ export default function Home() {
     }
   }, [])
 
-  const selectCharacter = useCallback(
-    async (character: Character) => {
-      if (character.id === activeCharacter?.id) return
-      tts.stop()
-      setMicOn(false)
-      recognition.stop()
-      setActiveCharacter(character)
-      setStreamingText('')
-      await loadHistory(character.id)
-    },
-    [activeCharacter?.id, loadHistory, recognition, setMicOn, tts]
-  )
-
   // ─── Очистить чат ───────────────────────────────────────────────────────
   const clearChat = useCallback(async () => {
     if (!activeCharacter) return
@@ -384,11 +374,24 @@ export default function Home() {
         </div>
 
         <div className="flex items-center gap-2">
-          <CharacterSwitcher
-            characters={characters}
-            activeId={activeCharacter?.id ?? null}
-            onSelect={(c) => void selectCharacter(c)}
-          />
+          <button
+            onClick={() => setChatOpen((v) => !v)}
+            className={cn(
+              'flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-all duration-200',
+              chatOpen
+                ? 'border-white/10 bg-white/[0.03] text-white/45 hover:border-white/20 hover:text-white/75'
+                : 'border-teal-400/40 bg-teal-400/10 text-teal-300'
+            )}
+            title={chatOpen ? 'Скрыть диалог' : 'Показать диалог'}
+            aria-pressed={!chatOpen}
+          >
+            {chatOpen ? (
+              <PanelRightClose className="size-3.5" />
+            ) : (
+              <PanelRightOpen className="size-3.5" />
+            )}
+            <span className="hidden sm:inline">Диалог</span>
+          </button>
         </div>
       </header>
 
@@ -444,8 +447,8 @@ export default function Home() {
                 label="Озвучка ответов"
                 title={
                   tts.voiceName
-                    ? `Озвучка: нейроголос сервера (Google RU) · резерв браузера: ${tts.voiceName}`
-                    : 'Озвучка: нейроголос сервера (Google RU) · резерв — системный голос'
+                    ? `Озвучка: нейроголос Microsoft Svetlana (Edge) · резерв браузера: ${tts.voiceName}`
+                    : 'Озвучка: нейроголос Microsoft Svetlana (Edge) · резерв — системный голос'
                 }
               />
               <ToggleChip
@@ -528,30 +531,32 @@ export default function Home() {
           </div>
         </section>
 
-        {/* Чат */}
-        <aside className="flex h-[46vh] w-full flex-col overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03] backdrop-blur-md lg:h-[calc(100vh-7.5rem)] lg:min-h-0 lg:w-[400px] lg:shrink-0">
-          <div className="flex items-center justify-between border-b border-white/5 px-4 py-3">
-            <div className="flex items-center gap-2">
-              <span
-                className="size-2 rounded-full"
-                style={{ backgroundColor: accent, boxShadow: `0 0 8px ${accent}` }}
-              />
-              <h2 className="text-sm font-semibold">
-                Диалог с {activeCharacter?.name ?? '…'}
-              </h2>
+        {/* Чат — можно скрыть кнопкой «Диалог» в шапке */}
+        {chatOpen && (
+          <aside className="flex h-[46vh] w-full flex-col overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03] backdrop-blur-md lg:h-[calc(100vh-7.5rem)] lg:min-h-0 lg:w-[400px] lg:shrink-0">
+            <div className="flex items-center justify-between border-b border-white/5 px-4 py-3">
+              <div className="flex items-center gap-2">
+                <span
+                  className="size-2 rounded-full"
+                  style={{ backgroundColor: accent, boxShadow: `0 0 8px ${accent}` }}
+                />
+                <h2 className="text-sm font-semibold">
+                  Диалог с {activeCharacter?.name ?? '…'}
+                </h2>
+              </div>
+              <span className="text-[11px] text-white/30">{messages.length} сообщений</span>
             </div>
-            <span className="text-[11px] text-white/30">{messages.length} сообщений</span>
-          </div>
-          <div className="min-h-0 flex-1">
-            <ChatPanel
-              messages={messages}
-              streamingText={streamingText}
-              accent={accent}
-              characterName={activeCharacter?.name ?? 'Ассистент'}
-              emptyHint={`Начни разговор — ${activeCharacter?.name ?? 'ассистент'} услышит и запомнит важное о тебе`}
-            />
-          </div>
-        </aside>
+            <div className="min-h-0 flex-1">
+              <ChatPanel
+                messages={messages}
+                streamingText={streamingText}
+                accent={accent}
+                characterName={activeCharacter?.name ?? 'Ассистент'}
+                emptyHint={`Начни разговор — ${activeCharacter?.name ?? 'ассистент'} услышит и запомнит важное о тебе`}
+              />
+            </div>
+          </aside>
+        )}
       </main>
 
       <MemoryDialog open={memoryOpen} onOpenChange={setMemoryOpen} onMemoryChanged={() => {}} />
