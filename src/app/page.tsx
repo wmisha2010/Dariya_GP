@@ -162,19 +162,34 @@ export default function Home() {
           return
         }
 
-        const res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            characterId: activeCharacter.id,
-            message: text,
-            search: searchOnRef.current,
-          }),
-        })
-
-        if (!res.ok || !res.body) {
-          const payload = await res.json().catch(() => null)
-          throw new Error(payload?.error ?? `Ошибка ${res.status}`)
+        // Запрос к ассистенту с автоповтором: перегрузка API (429/503) обычно
+        // проходит за секунды — молча ждём и пробуем снова; красная ошибка —
+        // только если не помогло даже после трёх попыток
+        let res: Response | null = null
+        let lastErrorText = ''
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const r = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              characterId: activeCharacter.id,
+              message: text,
+              search: searchOnRef.current,
+            }),
+          })
+          if (r.ok && r.body) {
+            res = r
+            break
+          }
+          const payload = (await r.json().catch(() => null)) as { error?: string } | null
+          lastErrorText = payload?.error ?? `Ошибка ${r.status}`
+          const retryable = r.status === 429 || r.status === 503 || r.status >= 500
+          if (!retryable || attempt === 2) break
+          if (attempt === 0) toast({ title: 'Модель притормозила — пробую ещё раз…' })
+          await new Promise((resolve) => setTimeout(resolve, 3500 * (attempt + 1)))
+        }
+        if (!res) {
+          throw new Error(lastErrorText || 'Ассистент не смог ответить')
         }
 
         const reader = res.body.getReader()

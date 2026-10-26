@@ -251,10 +251,11 @@ export async function POST(req: NextRequest) {
     ]
 
     const zai = await getZai()
-    // До 3 попыток с короткой паузой: при частой переписке API иногда отдаёт 429
+    // До 4 попыток с паузами: при частой переписке API иногда отдаёт 429 —
+    // перегрузка обычно проходит за секунды, добиваем молча на сервере
     let upstream: Awaited<ReturnType<typeof zai.chat.completions.create>> | null = null
     let lastChatError: unknown = null
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 4; attempt++) {
       try {
         upstream = await zai.chat.completions.create({
           messages: chatMessages,
@@ -267,14 +268,14 @@ export async function POST(req: NextRequest) {
         lastChatError = error
         const message = error instanceof Error ? error.message : String(error)
         const isRateLimit = message.includes('429') || message.toLowerCase().includes('too many')
-        if (!isRateLimit || attempt === 2) break
-        await sleep(1200 * (attempt + 1))
+        if (!isRateLimit || attempt === 3) break
+        await sleep([1500, 3000, 5000][attempt])
       }
     }
     if (!upstream) {
       console.error('POST /api/chat error:', lastChatError)
       return new Response(
-        JSON.stringify({ error: 'Ассистент сейчас перегружен — попробуй ещё раз через минуту' }),
+        JSON.stringify({ error: 'Хм, я сейчас перегружена — подожди полминуты и напиши ещё раз' }),
         { status: 503, headers: { 'Content-Type': 'application/json' } }
       )
     }
@@ -394,7 +395,7 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     console.error('POST /api/chat error:', error)
     return new Response(
-      JSON.stringify({ error: 'Ассистент сейчас перегружен — попробуй ещё раз через минуту' }),
+      JSON.stringify({ error: 'Хм, я сейчас перегружена — подожди полминуты и напиши ещё раз' }),
       { status: 500, headers: { 'Content-Type': 'application/json' } }
     )
   }
