@@ -8,6 +8,12 @@
  * Формат: REST v1beta, streamGenerateContent с alt=sse. Ответы конвертируются
  * в OpenAI-совместимый SSE (data: {"choices":[{"delta":{"content":...}}]}),
  * чтобы существующий парсер /api/chat не менять.
+ *
+ * ⚠️ Гео-ограничение Google: бесплатный тариф отклоняет запросы с серверов
+ * ряда регионов (Гонконг, Россия и др.) — «User location is not supported
+ * for the API use» (FAILED_PRECONDITION). Проверка по IP сервера, срабатывает
+ * после проверки ключа, стабильна (не мигает). Провайдер остаётся резервом:
+ * заработает автоматически при запуске в поддерживаемом регионе.
  */
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta'
@@ -71,7 +77,9 @@ function convertEvent(controller: ReadableStreamDefaultController<Uint8Array>, e
  * а не отдавал пользователю пустой ответ.
  */
 export async function createGeminiStream(options: GeminiStreamOptions): Promise<ReadableStream<Uint8Array>> {
-  const model = process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash'
+  // gemini-2.5-flash закрыт для новых ключей («no longer available to new
+  // users») — актуальная бесплатная модель по подсказке самого API.
+  const model = process.env.GEMINI_MODEL?.trim() || 'gemini-3.8-flash'
   // У 2.5-моделей «мышление» включено по умолчанию и съедает лимит вывода —
   // для живого болтового ассистента выключаем. У других поколений параметр
   // иной, поэтому не отправляем ничего, чтобы не поймать 400.

@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server'
 import ZAI from 'z-ai-web-dev-sdk'
 import { db } from '@/lib/db'
 import { createGeminiStream, getGeminiKey, type GeminiTurn } from '@/lib/gemini'
+import { createOpenRouterStream, getOpenRouterKey } from '@/lib/openrouter'
 
 export const maxDuration = 300
 
@@ -273,14 +274,28 @@ export async function POST(req: NextRequest) {
       geminiTurns.push({ role: 'user', parts: [{ text: userText }] })
     }
 
-    // ─── Провайдеры: Gemini (если задан GEMINI_API_KEY) → Z.ai ──────────────
-    // Gemini бесплатен и стабилен — идёт первым; любой его сбой (лимит,
-    // блокировка, сеть) молча откатывается на основной шлюз
+    // ─── Провайдеры: OpenRouter → Gemini → Z.ai ─────────────────────────────
+    // Бесплатные внешние провайдеры идут первыми; любой их сбой (нет ключа,
+    // гео-блок, лимит, сеть) молча откатывается на следующий, Z.ai — резерв
     let upstream: ChatUpstream = null
     let lastChatError: unknown = null
 
+    const openrouterKey = getOpenRouterKey()
+    if (openrouterKey) {
+      try {
+        upstream = await createOpenRouterStream({
+          apiKey: openrouterKey,
+          system: systemParts.join('\n\n'),
+          turns: geminiTurns,
+        })
+      } catch (error) {
+        lastChatError = error
+        console.error('OpenRouter недоступен, переключаюсь на резерв:', error)
+      }
+    }
+
     const geminiKey = getGeminiKey()
-    if (geminiKey) {
+    if (!upstream && geminiKey) {
       try {
         upstream = await createGeminiStream({
           apiKey: geminiKey,
