@@ -1,0 +1,56 @@
+// Схема БД для голосового ассистента «Дария» — веб-аналога Dewiar
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ИИ-персонажи (команда ассистентов, как в Dewiar)
+model Character {
+  id         String   @id @default(cuid())
+  slug       String   @unique
+  name       String
+  emoji      String
+  tagline    String
+  persona    String
+  accent     String   @default("#2dd4bf")
+  voicePitch Float    @default(1.0)
+  voiceRate  Float    @default(1.0)
+  isDefault  Boolean  @default(false)
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+  messages   Message[]
+}
+
+// История переписки
+model Message {
+  id          String    @id @default(cuid())
+  characterId String
+  role        String // "user" | "assistant"
+  content     String
+  createdAt   DateTime  @default(now())
+  character   Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+
+  @@index([characterId, createdAt])
+}
+
+// Память ассистента — факты о пользователе
+model Memory {
+  id        String   @id @default(cuid())
+  content   String
+  source    String   @default("chat") // "chat" | "manual"
+  createdAt DateTime @default(now())
+}
+
+// Дневник — краткие записи о разговорах по дням
+model DiaryEntry {
+  id        String   @id @default(cuid())
+  day       String   @unique // YYYY-MM-DD
+  content   String
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+}
