@@ -64,11 +64,12 @@ export default function Home() {
   searchOnRef.current = searchOn
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // ─── Озвучка ────────────────────────────────────────────────────────────
+  // ─── Озвучка: системный русский голос + эмоции ──────────────────────────
+  const characterGender = (activeCharacter?.voicePitch ?? 1) < 0.95 ? 'male' : 'female'
   const tts = useTtsQueue({
-    mode: 'server',
     pitch: activeCharacter?.voicePitch ?? 1,
     rate: activeCharacter?.voiceRate ?? 1,
+    gender: characterGender,
   })
 
   // ─── Отправка сообщения ─────────────────────────────────────────────────
@@ -371,6 +372,11 @@ export default function Home() {
                 onClick={toggleVoice}
                 icon={voiceOn ? <Volume2 className="size-3.5" /> : <VolumeX className="size-3.5" />}
                 label="Озвучка ответов"
+                title={
+                  tts.voiceName
+                    ? `Русский голос: ${tts.voiceName} (нейроголоса Edge звучат лучше всего)`
+                    : 'Русский голос не найден: установите системный русский голос или откройте в Edge/Chrome'
+                }
               />
               <ToggleChip
                 active={memoryOpen}
@@ -474,12 +480,14 @@ interface ToggleChipProps {
   onClick: () => void
   icon: React.ReactNode
   label: string
+  title?: string
 }
 
-function ToggleChip({ active, onClick, icon, label }: ToggleChipProps) {
+function ToggleChip({ active, onClick, icon, label, title }: ToggleChipProps) {
   return (
     <button
       onClick={onClick}
+      title={title}
       className={cn(
         'flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-all duration-200',
         active

@@ -187,6 +187,9 @@ export async function POST(req: NextRequest) {
       }
     }
     systemParts.push(
+      'Стиль речи для озвучивания: говори живым разговорным языком, короткими фразами; эмоции передавай словами и восклицаниями (междометия вроде «Ой», «Ух ты», «Хм» — умеренно); никаких markdown, эмодзи, списков и символов — всё будет произнесено вслух.'
+    )
+    systemParts.push(
       'Сегодняшняя дата: ' +
         new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })
     )
