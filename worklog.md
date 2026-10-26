@@ -273,3 +273,22 @@ Work Log:
 Stage Summary:
 - Обход подготовлен целиком на нашей стороне: после деплоя воркера пользователю достаточно прислать ссылку вида https://имя.аккаунт.workers.dev — я пропишу GEMINI_BASE_URL и прогоню живой тест
 - Альтернатива без деплоя остаётся: бесплатный ключ OpenRouter (уже встроен, приоритет в цепочке выше)
+
+---
+Task ID: 15
+Agent: Main agent (Z.ai)
+Task: Подключение реального ключа OpenRouter (пользователь прислал sk-or-v1-…) + заодно проверка деплоя релея
+
+Work Log:
+- Проверка релея audio-visualizer.wmisha2010.workers.dev: по-прежнему отдаёт HTML старого шаблона «Deep Audio Visualizer», а не {"ok":true,"relay":"gemini"} — код релея так и не задеплоен (не критично: пользователь выбрал путь OpenRouter)
+- Живой тест ключа OpenRouter: фейковый → 401 «User not found» (путь/auth верны), реальный → 429 upstream (ключ ВАЛИДЕН, лимитится модель gemma-4-31b:free)
+- Получен список из 17 бесплатных моделей; пробинг 10 кандидатов: gemma-4 (обе) — 429 upstream, nemotron-3-super — 404 (сломан у провайдера), inkling — 403 (только для агентских приложений), nemotron-3.5 — пустой контент (reasoning уходит в отдельное поле, парсер не увидит)
+- Победитель poolside/laguna-s-2.1:free: стриминг, русский ответ, первый токен ~3.7с; также валидны recursive/flint-v1.0:free, dots-studio/dots-3-note-preview:free, liquid/lfm-2.5-2.6b:free
+- Обнаружено свойство free-моделей: 429 upstream мигает волнами → внедрён нативный роутинг OpenRouter (body.models массив): первая 429 → OpenRouter сам берёт следующую (проверено: gemma 429 → авто-ответ flint за 2с)
+- ⚠️ Подводный камень: 'models' array must have 3 items or fewer (400) — список ограничен primary + 2 запасных (flint, dots)
+- openrouter.ts: дефолт модели сменён gemma-4-31b → poolside/laguna-s-2.1:free + FALLBACK_MODELS + models-массив в запросе; .env.local: OPENROUTER_API_KEY (реальный ключ) + OPENROUTER_MODEL=poolside/laguna-s-2.1:free
+- Перезапуск дев-сервера; живые тесты POST /api/chat: 200, русские ответы («Связь налаживается, и это уже отлично»), 1.8с, без фолбэков; удалено 6 тестовых сообщений из БД
+
+Stage Summary:
+- Дария теперь говорит через бесплатный OpenRouter с автороутингом (laguna-s-2.1 → flint → dots): ключ пользователя валиден, чат стабилен, Z.ai остаётся аварийным резервом
+- Gemini через релей остаётся опциональным улучшением: если пользователь всё же заменит код воркера (маркер {"ok":true,"relay":"gemini"}), достаточно раскомментировать GEMINI_BASE_URL в .env.local

@@ -16,6 +16,20 @@
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1'
 
+/**
+ * Бесплатные модели мигают: провайдер лимитирует их волнами (429 «temporarily
+ * rate-limited upstream»), поэтому отправляем не одну модель, а список —
+ * нативный роутинг OpenRouter сам перескакивает на доступную (проверено:
+ * gemma 429 → авто-ответ через flint за 2с). ⚠️ Лимит OpenRouter: в 'models'
+ * НЕ БОЛЬШЕ 3 элементов (иначе 400 «must have 3 items or fewer»), поэтому
+ * primary + 2 запасных. Список моделей: openrouter.ai/models?max_price=0
+ * laguna/flint/dots — проверены стримингом (русский контент в delta.content).
+ */
+const FALLBACK_MODELS = [
+  'recursive/flint-v1.0:free',
+  'dots-studio/dots-3-note-preview:free',
+]
+
 export function getOpenRouterKey(): string | null {
   const key = process.env.OPENROUTER_API_KEY?.trim()
   return key ? key : null
@@ -43,7 +57,11 @@ interface OpenRouterStreamOptions {
  */
 export async function createOpenRouterStream(options: OpenRouterStreamOptions): Promise<ReadableStream<Uint8Array>> {
   // Бесплатные модели меняются со временем — список: openrouter.ai/models?max_price=0
-  const model = process.env.OPENROUTER_MODEL?.trim() || 'google/gemma-4-31b-it:free'
+  // laguna-s-2.1 — проверена стримингом (русский ответ, первый токен ~3.7с);
+  // gemma-4:free стабильно ловит 429 upstream, потому только запасной вариант.
+  const primary =
+    process.env.OPENROUTER_MODEL?.trim() || 'poolside/laguna-s-2.1:free'
+  const models = [primary, ...FALLBACK_MODELS.filter((m) => m !== primary)]
 
   const messages: Array<{ role: string; content: string }> = [
     { role: 'system', content: options.system },
@@ -62,7 +80,8 @@ export async function createOpenRouterStream(options: OpenRouterStreamOptions): 
       'X-Title': 'Daria Assistant',
     },
     body: JSON.stringify({
-      model,
+      // Нативный роутинг OpenRouter: перебирает список сам, если модель лимитится
+      models,
       messages,
       stream: true,
       temperature: 0.9,
