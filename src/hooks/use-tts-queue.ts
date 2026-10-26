@@ -5,7 +5,17 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 interface UseTtsQueueOptions {
   /** Вызывается, когда вся очередь озвучена */
   onFinish?: () => void
+  /** Выбранный пользователем голос (id из белого списка сервера).
+   * Меняется только вручную — тембр в разговоре сам не «скачет» */
+  voiceId?: string
 }
+
+/** Подписи голосов для тултипа в UI (белый список = /api/tts) */
+const VOICE_LABELS: Record<string, string> = {
+  svetlana: 'Microsoft SvetlanaNeural (Edge)',
+  irina: 'Piper Irina (локальный голос)',
+}
+const DEFAULT_VOICE_ID = 'svetlana'
 
 type Emotion = 'neutral' | 'excited' | 'question' | 'sympathy' | 'thoughtful'
 
@@ -44,16 +54,14 @@ const EMOJI_RE = /[\p{Extended_Pictographic}\u200d\uFE0F\u20E3]/gu
 
 const PUMP_TICK_MS = 40
 const SENTENCE_END = /[.!?…]$/
-/** Имя единственного голоса ассистента — для тултипа в UI */
-const SERVER_VOICE_NAME = 'Microsoft SvetlanaNeural (Edge)'
-/** Мягкий лимит длины фразы: Edge Neural спокойно тянет длинные фрагменты,
- * а меньше кусков — меньше технических пауз между ними */
-const MAX_SENTENCE_CHARS = 260
 /** Сколько фраз одновременно качаем фоном (сокет Edge мультиплексируется по requestId) */
 const MAX_PREFETCH = 3
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v))
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+/** Мягкий лимит длины фразы: Edge Neural спокойно тянет длинные фрагменты,
+ * а меньше кусков — меньше технических пауз между ними */
+const MAX_SENTENCE_CHARS = 260
 
 /** Детерминированный микро-джиттер ±amp: голос живее, чем ровный «робот» */
 function jitter(text: string, amp: number): number {
@@ -93,19 +101,20 @@ function cleanForSpeech(text: string): string {
 }
 
 /**
- * Потоковая очередь озвучки. Единственный голос — серверный нейроголос
- * Microsoft Svetlana (Edge) с эмоциональной SSML-просодией. Никаких
- * резервных синтезаторов: при сбое сети фраза повторно качается, а если
- * сервер совсем недоступен — фраза пропускается молча, но тембр в разговоре
- * никогда не меняется. Текст добавляется частями (enqueue) во время
- * стриминга: завершённые предложения звучат сразу. Мгновенная остановка
- * (перебивание) через stop().
+ * Потоковая очередь озвучки. Единственный провайдер — серверный нейроголос
+ * Microsoft Edge с эмоциональной SSML-просодией; конкретный голос выбирает
+ * пользователь вручную (voiceId). Никаких резервных синтезаторов: при сбое
+ * сети фраза повторно качается, а если сервер совсем недоступен — фраза
+ * пропускается молча, но тембр в разговоре никогда не меняется сам. Текст
+ * добавляется частями (enqueue) во время стриминга: завершённые предложения
+ * звучат сразу. Мгновенная остановка (перебивание) через stop().
  */
 export function useTtsQueue(options: UseTtsQueueOptions = {}) {
   const { onFinish } = options
+  const voiceId = options.voiceId ?? DEFAULT_VOICE_ID
 
   const [speaking, setSpeaking] = useState(false)
-  const [voiceName] = useState<string | null>(SERVER_VOICE_NAME)
+  const voiceName = VOICE_LABELS[voiceId] ?? VOICE_LABELS[DEFAULT_VOICE_ID]
 
   const generationRef = useRef(0)
   const queueRef = useRef<string[]>([])
@@ -114,14 +123,15 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
   const pumpingRef = useRef(false)
   const sourceRef = useRef<AudioBufferSourceNode | null>(null)
   const ctxRef = useRef<AudioContext | null>(null)
-  /** Prefetch: аудио фраз, скачанных заранее — убирает паузы между предложениями */
+  /** Prefetch: аудио фраз, скачанных заранее — убирает паузы между предложениями.
+   * Ключ включает голос, чтобы после ручной смены голоса не играли старые фразы */
   const audioPrefetchRef = useRef(new Map<string, Promise<ArrayBuffer | null>>())
   const inflightPrefetchRef = useRef(0)
-  const optsRef = useRef({ onFinish })
+  const optsRef = useRef({ onFinish, voiceId })
 
   useEffect(() => {
-    optsRef.current = { onFinish }
-  }, [onFinish])
+    optsRef.current = { onFinish, voiceId }
+  }, [onFinish, voiceId])
 
   const ensureCtx = useCallback((): AudioContext | null => {
     if (typeof window === 'undefined') return null
@@ -217,6 +227,12 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
     [ensureCtx]
   )
 
+  /** Ключ prefetch-кэша: текст + голос (после смены голоса старое аудио не играет) */
+  const prefetchKey = useCallback(
+    (clean: string) => `${optsRef.current.voiceId}|${clean}`,
+    []
+  )
+
   /** Скачиваем аудио фразы с сервера. До двух попыток: короткий сетевой сбой
    * не должен оставлять фразу без голоса. null — сервер недоступен, фразу
    * пропускаем молча (голос всегда один, менять тембр на другой движок — нельзя) */
@@ -235,6 +251,7 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
             text: clean.slice(0, 800),
             rate: prosody.rate,
             pitch: prosody.pitch,
+            voice: optsRef.current.voiceId,
           }),
           signal: controller.signal,
         })
@@ -253,16 +270,17 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
   /** Стартует фоновую загрузку аудио фразы (если она ещё не качается) */
   const startPrefetch = useCallback(
     (clean: string): boolean => {
-      if (audioPrefetchRef.current.has(clean)) return false
+      const key = prefetchKey(clean)
+      if (audioPrefetchRef.current.has(key)) return false
       if (inflightPrefetchRef.current >= MAX_PREFETCH) return false
       inflightPrefetchRef.current++
       const promise = fetchServerAudio(clean).finally(() => {
         inflightPrefetchRef.current--
       })
-      audioPrefetchRef.current.set(clean, promise)
+      audioPrefetchRef.current.set(key, promise)
       return true
     },
-    [fetchServerAudio]
+    [fetchServerAudio, prefetchKey]
   )
 
   /** Качаем аудио первых фраз очереди заранее — между предложениями не будет тишины */
@@ -273,16 +291,16 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
       for (const item of queueRef.current) {
         if (freeSlots <= 0) return
         const clean = cleanForSpeech(item)
-        if (!clean || audioPrefetchRef.current.has(clean)) continue
+        if (!clean || audioPrefetchRef.current.has(prefetchKey(clean))) continue
         if (startPrefetch(clean)) freeSlots--
       }
     },
-    [startPrefetch]
+    [prefetchKey, startPrefetch]
   )
 
   /**
-   * Озвучка одной фразы серверным нейроголосом — единственным голосом
-   * ассистента. Аудио почти всегда уже скачано фоном (prefetch) — играем
+   * Озвучка одной фразы серверным нейроголосом (голос — выбор пользователя).
+   * Аудио почти всегда уже скачано фоном (prefetch) — играем
    * сразу, без сетевой тишины между предложениями. При недоступности
    * сервера фраза пропускается молча: тембр в разговоре не меняется.
    */
@@ -291,8 +309,9 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
       const clean = cleanForSpeech(sentence)
       if (!clean) return
 
-      let prefetched = audioPrefetchRef.current.get(clean) ?? null
-      audioPrefetchRef.current.delete(clean)
+      const key = prefetchKey(clean)
+      let prefetched = audioPrefetchRef.current.get(key) ?? null
+      audioPrefetchRef.current.delete(key)
       // Не успели prefetch'нуть (первая фраза, лимит одновременных) — качаем сейчас
       if (!prefetched) {
         prefetched = fetchServerAudio(clean)
@@ -309,7 +328,7 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
         // фразу пропускаем: другой голос включать нельзя
       }
     },
-    [fetchServerAudio, playServerAudio]
+    [fetchServerAudio, playServerAudio, prefetchKey]
   )
 
   /** Насос очереди: берёт предложения и озвучивает их по порядку */

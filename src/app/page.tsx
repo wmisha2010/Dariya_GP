@@ -13,6 +13,7 @@ import { VoiceOrb } from '@/components/daria/voice-orb'
 import { cn } from '@/lib/utils'
 import type { AssistantState, Character, ChatMessage } from '@/lib/types'
 import {
+  AudioLines,
   Brain,
   Globe,
   Mic,
@@ -32,6 +33,15 @@ const QUICK_PROMPTS = [
   'Подколи меня по-доброму',
   'Включи спокойную музыку',
 ]
+
+/** Доступные голоса ассистента — белый список в /api/tts, id совпадают */
+const TTS_VOICES = [
+  { id: 'svetlana', name: 'Светлана' },
+  { id: 'irina', name: 'Ирина' },
+] as const
+
+/** Ключ localStorage, где хранится выбор голоса */
+const TTS_VOICE_STORAGE_KEY = 'daria-tts-voice'
 
 /** Пауза после конца озвучки, прежде чем снова включать микрофон (затухание эха) */
 const ECHO_GRACE_MS = 700
@@ -92,8 +102,29 @@ export default function Home() {
   const resumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastBusyToastRef = useRef(0)
 
-  // ─── Озвучка: единственный серверный нейроголос Svetlana (Edge) + эмоции ─
-  const tts = useTtsQueue()
+  // ─── Озвучка: серверный нейроголос Edge (голос выбирается кнопкой «Голос») ─
+  const [ttsVoice, setTtsVoice] = useState<string>('svetlana')
+
+  // Восстанавливаем выбранный голос с прошлого визита
+  useEffect(() => {
+    const saved = window.localStorage.getItem(TTS_VOICE_STORAGE_KEY)
+    if (saved && TTS_VOICES.some((v) => v.id === saved)) setTtsVoice(saved)
+  }, [])
+
+  /** Циклическое переключение голоса с сохранением выбора */
+  const cycleVoice = useCallback(() => {
+    setTtsVoice((prev) => {
+      const idx = TTS_VOICES.findIndex((v) => v.id === prev)
+      const next = TTS_VOICES[(idx + 1) % TTS_VOICES.length]
+      window.localStorage.setItem(TTS_VOICE_STORAGE_KEY, next.id)
+      return next.id
+    })
+  }, [])
+
+  const currentVoiceLabel =
+    TTS_VOICES.find((v) => v.id === ttsVoice)?.name ?? TTS_VOICES[0].name
+
+  const tts = useTtsQueue({ voiceId: ttsVoice })
 
   ttsSpeakingRef.current = tts.speaking
   musicPlayingRef.current = music !== null
@@ -188,7 +219,7 @@ export default function Home() {
           if (attempt === 0) toast({ title: 'Модель притормозила — пробую ещё раз…' })
           await new Promise((resolve) => setTimeout(resolve, 3500 * (attempt + 1)))
         }
-        if (!res) {
+        if (!res || !res.body) {
           throw new Error(lastErrorText || 'Ассистент не смог ответить')
         }
 
@@ -530,8 +561,17 @@ export default function Home() {
                 onClick={toggleVoice}
                 icon={voiceOn ? <Volume2 className="size-3.5" /> : <VolumeX className="size-3.5" />}
                 label="Озвучка ответов"
-                title={`Озвучка: нейроголос ${tts.voiceName ?? 'Microsoft Svetlana (Edge)'} — единственный голос`}
+                title={`Озвучка ответов · Голос: ${tts.voiceName}`}
               />
+              <button
+                onClick={cycleVoice}
+                title={`Голос ассистента: ${tts.voiceName}. Нажми, чтобы переключить на следующий`}
+                aria-label="Сменить голос ассистента"
+                className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs text-white/45 transition-all duration-200 hover:border-teal-400/40 hover:bg-teal-400/10 hover:text-teal-300"
+              >
+                <AudioLines className="size-3.5" />
+                <span className="hidden sm:inline">Голос: {currentVoiceLabel}</span>
+              </button>
               <ToggleChip
                 active={memoryOpen}
                 onClick={() => setMemoryOpen(true)}
