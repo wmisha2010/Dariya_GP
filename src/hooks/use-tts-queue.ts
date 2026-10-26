@@ -3,12 +3,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 interface UseTtsQueueOptions {
-  /** Базовая высота голоса персонажа (1.0 — нейтрально) — для системного синтеза */
-  pitch?: number
-  /** Базовая скорость речи персонажа — для системного синтеза */
-  rate?: number
-  /** Пол голоса: мужской тембр ниже (замедление + браузерный выбор голоса) */
-  gender?: 'female' | 'male'
   /** Вызывается, когда вся очередь озвучена */
   onFinish?: () => void
 }
@@ -26,15 +20,6 @@ const SERVER_EMOTION_PROSODY: Record<Emotion, { rate: number; pitch: number }> =
   question: { rate: 14, pitch: 8 },
   sympathy: { rate: 8, pitch: -6 },
   thoughtful: { rate: 7, pitch: -8 },
-}
-
-/** Эмоциональные профили системного синтеза (fallback) — темп повышен */
-const BROWSER_EMOTION_PROFILE: Record<Emotion, { pitch: number; rate: number }> = {
-  neutral: { pitch: 1.0, rate: 1.12 },
-  excited: { pitch: 1.15, rate: 1.2 },
-  question: { pitch: 1.07, rate: 1.1 },
-  sympathy: { pitch: 0.93, rate: 0.98 },
-  thoughtful: { pitch: 0.97, rate: 0.96 },
 }
 
 /**
@@ -57,20 +42,13 @@ const SYMPATHY_RE =
 const THOUGHTFUL_RE = /(хм+|так-так|интересно|любопытно|давай подумаем|знаешь что|смотри|загадка)/i
 const EMOJI_RE = /[\p{Extended_Pictographic}\u200d\uFE0F\u20E3]/gu
 
-const FEMALE_HINTS = /(svetlana|milena|alena|katya|katia|irina|tatyana|female|жен)/i
-const MALE_HINTS = /(yuri|dmitri|pavel|dariy|artemiy|aleksei|alexey|male|муж)/i
-
 const PUMP_TICK_MS = 40
 const SENTENCE_END = /[.!?…]$/
-/** Ждём появления системных голосов перед fallback-озвучкой */
-const VOICES_WAIT_MS = 1500
+/** Имя единственного голоса ассистента — для тултипа в UI */
+const SERVER_VOICE_NAME = 'Microsoft SvetlanaNeural (Edge)'
 /** Мягкий лимит длины фразы: Edge Neural спокойно тянет длинные фрагменты,
  * а меньше кусков — меньше технических пауз между ними */
 const MAX_SENTENCE_CHARS = 260
-/** Сколько серверных неудач подряд переводят голос в cooldown */
-const SERVER_FAIL_THRESHOLD = 2
-/** Длительность cooldown серверного голоса после неудач */
-const SERVER_COOLDOWN_MS = 90_000
 /** Сколько фраз одновременно качаем фоном (сокет Edge мультиплексируется по requestId) */
 const MAX_PREFETCH = 3
 
@@ -114,96 +92,36 @@ function cleanForSpeech(text: string): string {
     .trim()
 }
 
-/** Выбираем лучший русский голос для fallback-синтеза */
-function pickVoice(
-  synth: SpeechSynthesis,
-  gender: 'female' | 'male' | undefined
-): SpeechSynthesisVoice | null {
-  const ru = synth.getVoices().filter((v) => v.lang?.toLowerCase().startsWith('ru'))
-  if (ru.length === 0) return null
-  const score = (v: SpeechSynthesisVoice): number => {
-    const n = v.name.toLowerCase()
-    let s = 0
-    if (/natural|neural/.test(n)) s += 6
-    if (/google/.test(n)) s += 5
-    if (/premium|enhanced/.test(n)) s += 3
-    if (v.localService) s += 1
-    if (gender === 'female') {
-      if (FEMALE_HINTS.test(n)) s += 4
-      if (MALE_HINTS.test(n)) s -= 4
-    } else if (gender === 'male') {
-      if (MALE_HINTS.test(n)) s += 4
-      if (FEMALE_HINTS.test(n)) s -= 4
-    }
-    if (/espeak/.test(n)) s -= 8
-    return s
-  }
-  return ru.sort((a, b) => score(b) - score(a))[0] ?? null
-}
-
 /**
- * Потоковая очередь озвучки. Основной путь — серверный нейроголос (Google RU)
- * с эмоциональной просодией через Web Audio (playbackRate меняет темп и тон).
- * При сбое — автоматический fallback на системный синтез речи. Текст
- * добавляется частями (enqueue) во время стриминга: завершённые предложения
- * звучат сразу. Мгновенная остановка (перебивание) через stop().
+ * Потоковая очередь озвучки. Единственный голос — серверный нейроголос
+ * Microsoft Svetlana (Edge) с эмоциональной SSML-просодией. Никаких
+ * резервных синтезаторов: при сбое сети фраза повторно качается, а если
+ * сервер совсем недоступен — фраза пропускается молча, но тембр в разговоре
+ * никогда не меняется. Текст добавляется частями (enqueue) во время
+ * стриминга: завершённые предложения звучат сразу. Мгновенная остановка
+ * (перебивание) через stop().
  */
 export function useTtsQueue(options: UseTtsQueueOptions = {}) {
-  const { pitch = 1, rate = 1, gender = 'female', onFinish } = options
+  const { onFinish } = options
 
   const [speaking, setSpeaking] = useState(false)
-  const [voiceName, setVoiceName] = useState<string | null>(null)
-  const [voiceCount, setVoiceCount] = useState(0)
-  const [voiceSupported, setVoiceSupported] = useState(true)
+  const [voiceName] = useState<string | null>(SERVER_VOICE_NAME)
 
   const generationRef = useRef(0)
   const queueRef = useRef<string[]>([])
   const pendingRef = useRef('')
   const streamEndedRef = useRef(false)
   const pumpingRef = useRef(false)
-  const utterRef = useRef<SpeechSynthesisUtterance | null>(null)
   const sourceRef = useRef<AudioBufferSourceNode | null>(null)
   const ctxRef = useRef<AudioContext | null>(null)
-  const voicesRef = useRef<SpeechSynthesisVoice[]>([])
-  const serverFailCountRef = useRef(0)
-  const serverCooldownUntilRef = useRef(0)
   /** Prefetch: аудио фраз, скачанных заранее — убирает паузы между предложениями */
   const audioPrefetchRef = useRef(new Map<string, Promise<ArrayBuffer | null>>())
   const inflightPrefetchRef = useRef(0)
-  const optsRef = useRef({ pitch, rate, gender, onFinish })
+  const optsRef = useRef({ onFinish })
 
   useEffect(() => {
-    optsRef.current = { pitch, rate, gender, onFinish }
-  }, [pitch, rate, gender, onFinish])
-
-  // ─── Загрузка списка голосов (в Chrome приходит асинхронно) ─────────────
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      setVoiceSupported(false)
-      return
-    }
-    const synth = window.speechSynthesis
-    const update = () => {
-      const ru = synth.getVoices().filter((v) => v.lang?.toLowerCase().startsWith('ru'))
-      voicesRef.current = ru
-      setVoiceCount(ru.length)
-    }
-    update()
-    synth.addEventListener('voiceschanged', update)
-    // Подстраховка: некоторые браузеры не всегда присылают voiceschanged
-    const timers = [250, 800, 2000, 4000].map((ms) => setTimeout(update, ms))
-    return () => {
-      synth.removeEventListener('voiceschanged', update)
-      timers.forEach(clearTimeout)
-    }
-  }, [])
-
-  // Отражаем выбранную резервную голосовую персону (для подсказки в UI)
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return
-    const voice = pickVoice(window.speechSynthesis, gender)
-    setVoiceName(voice?.name ?? null)
-  }, [gender, voiceCount])
+    optsRef.current = { onFinish }
+  }, [onFinish])
 
   const ensureCtx = useCallback((): AudioContext | null => {
     if (typeof window === 'undefined') return null
@@ -226,7 +144,6 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
     streamEndedRef.current = true
     queueRef.current = []
     pendingRef.current = ''
-    utterRef.current = null
     audioPrefetchRef.current.clear()
     if (sourceRef.current) {
       try {
@@ -236,9 +153,6 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
       }
       sourceRef.current.disconnect()
       sourceRef.current = null
-    }
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel()
     }
     setSpeaking(false)
   }, [])
@@ -250,26 +164,13 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
     optsRef.current.onFinish?.()
   }
 
-  /** Ждём загрузки голосов перед fallback-фразой (иначе Chrome промолчит) */
-  const waitVoicesReady = async (generation: number): Promise<void> => {
-    if (voicesRef.current.length > 0) return
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return
-    const synth = window.speechSynthesis
-    const deadline = Date.now() + VOICES_WAIT_MS
-    while (voicesRef.current.length === 0 && Date.now() < deadline) {
-      await sleep(100)
-      if (generation !== generationRef.current) return
-      voicesRef.current = synth.getVoices().filter((v) => v.lang?.toLowerCase().startsWith('ru'))
-    }
-  }
-
   /** Проигрываем MP3 с сервера (просодия эмоций уже в SSML на сервере) */
   const playServerAudio = useCallback(
     async (bytes: ArrayBuffer, sentence: string, generation: number): Promise<void> => {
       const ctx = ensureCtx()
       if (!ctx) throw new Error('WebAudio недоступен')
       // Если контекст не ожил (нет активации пользователя, политика
-      // автовоспроизведения) — бросаем ошибку и уходим в системный fallback:
+      // автовоспроизведения) — бросаем ошибку и фразу пропускаем:
       // иначе насос очереди зависнет навсегда на источнике, который молчит
       // (state приводим к string: lib-типы окружения не знают 'running')
       if ((ctx.state as string) !== 'running') {
@@ -316,40 +217,37 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
     [ensureCtx]
   )
 
-  /** Скачиваем аудио фразы с сервера (null при сбое — фраза уйдёт в системный синтез) */
+  /** Скачиваем аудио фразы с сервера. До двух попыток: короткий сетевой сбой
+   * не должен оставлять фразу без голоса. null — сервер недоступен, фразу
+   * пропускаем молча (голос всегда один, менять тембр на другой движок — нельзя) */
   const fetchServerAudio = useCallback(async (clean: string): Promise<ArrayBuffer | null> => {
     // Просодия эмоций считается на сервере и попадает в ключ кэша
     const prosody = SERVER_EMOTION_PROSODY[detectEmotion(clean)]
-    // Таймаут fetch: подвисший запрос не должен блокировать очередь озвучки
-    const controller = new AbortController()
-    const fetchTimeout = setTimeout(() => controller.abort(), 10_000)
-    try {
-      const res = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: clean.slice(0, 800),
-          rate: prosody.rate,
-          pitch: prosody.pitch,
-        }),
-        signal: controller.signal,
-      })
-      if (!res.ok) throw new Error(`TTS ${res.status}`)
-      const bytes = await res.arrayBuffer()
-      serverFailCountRef.current = 0
-      return bytes
-    } catch {
-      // Серверный голос не сработал (в т.ч. таймаут) — копим неудачи
-      // и включаем cooldown, фразу произнесёт системный синтез
-      serverFailCountRef.current++
-      if (serverFailCountRef.current >= SERVER_FAIL_THRESHOLD) {
-        serverCooldownUntilRef.current = Date.now() + SERVER_COOLDOWN_MS
-        serverFailCountRef.current = 0
+    for (let attempt = 0; attempt < 2; attempt++) {
+      // Таймаут fetch: подвисший запрос не должен блокировать очередь озвучки
+      const controller = new AbortController()
+      const fetchTimeout = setTimeout(() => controller.abort(), 10_000)
+      try {
+        const res = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: clean.slice(0, 800),
+            rate: prosody.rate,
+            pitch: prosody.pitch,
+          }),
+          signal: controller.signal,
+        })
+        if (!res.ok) throw new Error(`TTS ${res.status}`)
+        return await res.arrayBuffer()
+      } catch {
+        // Сетевой сбой/таймаут — вторая попытка через короткую паузу
+        if (attempt === 0) await sleep(400)
+      } finally {
+        clearTimeout(fetchTimeout)
       }
-      return null
-    } finally {
-      clearTimeout(fetchTimeout)
     }
+    return null
   }, [])
 
   /** Стартует фоновую загрузку аудио фразы (если она ещё не качается) */
@@ -371,7 +269,6 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
   const ensurePrefetch = useCallback(
     (generation: number) => {
       if (generation !== generationRef.current) return
-      if (Date.now() < serverCooldownUntilRef.current) return
       let freeSlots = MAX_PREFETCH - inflightPrefetchRef.current
       for (const item of queueRef.current) {
         if (freeSlots <= 0) return
@@ -383,56 +280,11 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
     [startPrefetch]
   )
 
-  /** Озвучиваем фразу системным синтезом (fallback) с эмоциональными параметрами */
-  const speakBrowser = useCallback((text: string, generation: number): Promise<void> => {
-    return new Promise<void>((resolve) => {
-      if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-        resolve()
-        return
-      }
-      const synth = window.speechSynthesis
-      const voice = pickVoice(synth, optsRef.current.gender)
-      if (!voice) {
-        // Русских голосов нет (headless-браузер / пустая система) — пропускаем молча
-        resolve()
-        return
-      }
-
-      const prof = BROWSER_EMOTION_PROFILE[detectEmotion(text)]
-      const u = new SpeechSynthesisUtterance(text)
-      u.voice = voice
-      u.lang = voice.lang || 'ru-RU'
-      u.pitch = clamp(optsRef.current.pitch * prof.pitch * jitter(text, 0.035), 0.2, 1.9)
-      u.rate = clamp(optsRef.current.rate * prof.rate * jitter(`${text}·r`, 0.025), 0.55, 1.8)
-      u.volume = 1
-
-      let settled = false
-      const finishOnce = () => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        if (utterRef.current === u) utterRef.current = null
-        resolve()
-      }
-      // Страховка: редкие движки не вызывают onend — считаем время по длине
-      const estimated = (text.length / 11) * 1000 / Math.max(u.rate, 0.5)
-      const timer = setTimeout(finishOnce, estimated + 4000)
-      u.onend = finishOnce
-      u.onerror = () => finishOnce()
-
-      utterRef.current = u
-      try {
-        synth.speak(u)
-      } catch {
-        finishOnce()
-      }
-    })
-  }, [])
-
   /**
-   * Озвучка одной фразы: серверный нейроголос, при сбое — системный.
-   * Аудио почти всегда уже скачано фоном (prefetch) — играем сразу,
-   * без сетевой тишины между предложениями.
+   * Озвучка одной фразы серверным нейроголосом — единственным голосом
+   * ассистента. Аудио почти всегда уже скачано фоном (prefetch) — играем
+   * сразу, без сетевой тишины между предложениями. При недоступности
+   * сервера фраза пропускается молча: тембр в разговоре не меняется.
    */
   const speakSentence = useCallback(
     async (sentence: string, generation: number): Promise<void> => {
@@ -442,30 +294,22 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
       let prefetched = audioPrefetchRef.current.get(clean) ?? null
       audioPrefetchRef.current.delete(clean)
       // Не успели prefetch'нуть (первая фраза, лимит одновременных) — качаем сейчас
-      if (!prefetched && Date.now() >= serverCooldownUntilRef.current) {
+      if (!prefetched) {
         prefetched = fetchServerAudio(clean)
       }
 
-      let bytes: ArrayBuffer | null = null
-      if (prefetched) {
-        bytes = await prefetched
-        if (generation !== generationRef.current) return
-      }
-
-      if (bytes) {
-        try {
-          await playServerAudio(bytes, clean, generation)
-          return
-        } catch {
-          // WebAudio не смог (контекст не активен и т.п.) — уходим в системный синтез
-        }
-      }
-
-      await waitVoicesReady(generation)
+      const bytes = await prefetched
       if (generation !== generationRef.current) return
-      await speakBrowser(clean, generation)
+      if (!bytes) return
+
+      try {
+        await playServerAudio(bytes, clean, generation)
+      } catch {
+        // WebAudio не смог проиграть (контекст не активен и т.п.) —
+        // фразу пропускаем: другой голос включать нельзя
+      }
     },
-    [fetchServerAudio, playServerAudio, speakBrowser]
+    [fetchServerAudio, playServerAudio]
   )
 
   /** Насос очереди: берёт предложения и озвучивает их по порядку */
@@ -513,8 +357,8 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
       .split(/(?<=[.!?…])\s+|\n+/)
       .map((s) => s.trim())
       .filter(Boolean)
-    // Длинные предложения дополнительно режем по пробелам — Google TTS
-    // принимает короткие фрагменты, а паузы между кусками звучат естественно
+    // Длинные предложения дополнительно режем по пробелам — короткие куски
+    // звучат живее, а паузы между ними минимальны
     const result: string[] = []
     for (const sentence of raw) {
       if (sentence.length <= MAX_SENTENCE_CHARS) {
@@ -597,13 +441,10 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
     })
   }, [])
 
-  // Прогреваем список голосов и аудиоконтекст по первому взаимодействию
+  // Прогреваем аудиоконтекст по первому взаимодействию (для воспроизведения MP3)
   useEffect(() => {
     const warmup = () => {
       ensureCtx()
-      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-        window.speechSynthesis.getVoices()
-      }
     }
     window.addEventListener('pointerdown', warmup, { once: true })
     window.addEventListener('keydown', warmup, { once: true })
@@ -615,5 +456,5 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
 
   useEffect(() => stop, [stop])
 
-  return { speak, enqueue, endStream, stop, speaking, voiceName, voiceSupported }
+  return { speak, enqueue, endStream, stop, speaking, voiceName }
 }

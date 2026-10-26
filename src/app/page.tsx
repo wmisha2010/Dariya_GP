@@ -92,13 +92,8 @@ export default function Home() {
   const resumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastBusyToastRef = useRef(0)
 
-  // ─── Озвучка: системный русский голос + эмоции ──────────────────────────
-  const characterGender = (activeCharacter?.voicePitch ?? 1) < 0.95 ? 'male' : 'female'
-  const tts = useTtsQueue({
-    pitch: activeCharacter?.voicePitch ?? 1,
-    rate: activeCharacter?.voiceRate ?? 1,
-    gender: characterGender,
-  })
+  // ─── Озвучка: единственный серверный нейроголос Svetlana (Edge) + эмоции ─
+  const tts = useTtsQueue()
 
   ttsSpeakingRef.current = tts.speaking
   musicPlayingRef.current = music !== null
@@ -520,11 +515,7 @@ export default function Home() {
                 onClick={toggleVoice}
                 icon={voiceOn ? <Volume2 className="size-3.5" /> : <VolumeX className="size-3.5" />}
                 label="Озвучка ответов"
-                title={
-                  tts.voiceName
-                    ? `Озвучка: нейроголос Microsoft Svetlana (Edge) · резерв браузера: ${tts.voiceName}`
-                    : 'Озвучка: нейроголос Microsoft Svetlana (Edge) · резерв — системный голос'
-                }
+                title={`Озвучка: нейроголос ${tts.voiceName ?? 'Microsoft Svetlana (Edge)'} — единственный голос`}
               />
               <ToggleChip
                 active={memoryOpen}
