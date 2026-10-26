@@ -8,6 +8,7 @@ import { useSpeechRecognition } from '@/hooks/use-speech-recognition'
 import { useTtsQueue } from '@/hooks/use-tts-queue'
 import { ChatPanel } from '@/components/daria/chat-panel'
 import { MemoryDialog } from '@/components/daria/memory-dialog'
+import { MusicPlayer } from '@/components/daria/music-player'
 import { VoiceOrb } from '@/components/daria/voice-orb'
 import { cn } from '@/lib/utils'
 import type { AssistantState, Character, ChatMessage } from '@/lib/types'
@@ -35,6 +36,14 @@ const QUICK_PROMPTS = [
 /** Пауза после конца озвучки, прежде чем снова включать микрофон (затухание эха) */
 const ECHO_GRACE_MS = 700
 
+/** Голосовое управление музыкой: «включи/поставь/запусти …» */
+const MUSIC_TRIGGER_RE = /^\s*(включи(?:те)?|поставь(?:те)?|запусти(?:те)?|сыграй(?:те)?|играй(?:те)?)\s+/i
+/** «выключи/стоп …» — остановить плеер */
+const MUSIC_STOP_RE = /^\s*(выключи(?:те)?|останови(?:те)?|стоп|хватит)\s*/i
+/** В команде должна быть музыкальная тема — чтобы «включи свет» не запускал плеер */
+const MUSIC_TOPIC_RE =
+  /(песн|музык|трек|плейлист|композици|ремикс|альбом|рэп|\bрок|\bпоп|джаз|блюз|классическ|инструментальн|фортепиан|гитар|металл|электро|танцевальн|спокойн|грустн|весел|весёл|романтич|колыбельн|хит|клип|мелод|исполнител|расслаб|концентрац|фонов|звук\w*\s+природ|дожд)/i
+
 const STATUS_TEXT: Record<AssistantState, string> = {
   idle: 'Нажми микрофон или напиши сообщение',
   listening: 'Слушаю…',
@@ -57,6 +66,8 @@ export default function Home() {
   const [memoryOpen, setMemoryOpen] = useState(false)
   /** Панель диалога скрыта/показана */
   const [chatOpen, setChatOpen] = useState(true)
+  /** Сейчас играет трек (YouTube-плеер смонтирован) */
+  const [music, setMusic] = useState<{ videoId: string; title: string; url: string } | null>(null)
 
   // Ввод
   const [inputValue, setInputValue] = useState('')
@@ -75,6 +86,7 @@ export default function Home() {
   const [micDesired, setMicDesired] = useState(false) // пользователь включил микрофон
   const micDesiredRef = useRef(false)
   const ttsSpeakingRef = useRef(false)
+  const musicPlayingRef = useRef(false)
   const wasSpeakingRef = useRef(false)
   const echoMuteUntilRef = useRef(0)
   const resumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -89,8 +101,22 @@ export default function Home() {
   })
 
   ttsSpeakingRef.current = tts.speaking
-  /** Всё услышанное во время озвучки и сразу после — эхо, а не речь пользователя */
-  const isEcho = () => ttsSpeakingRef.current || Date.now() < echoMuteUntilRef.current
+  musicPlayingRef.current = music !== null
+  /** Всё услышанное во время озвучки/музыки и сразу после — эхо, а не речь пользователя */
+  const isEcho = () =>
+    ttsSpeakingRef.current || musicPlayingRef.current || Date.now() < echoMuteUntilRef.current
+
+  /** Локальный ответ без LLM: музыкальные команды отвечают мгновенно */
+  const assistantLocalReply = useCallback(
+    (content: string) => {
+      setMessages((prev) => [
+        ...prev,
+        { id: `assistant-${Date.now()}`, role: 'assistant', content, createdAt: new Date().toISOString() },
+      ])
+      if (voiceOnRef.current) tts.speak(content)
+    },
+    [tts]
+  )
 
   // ─── Отправка сообщения ─────────────────────────────────────────────────
   const send = useCallback(
@@ -111,6 +137,36 @@ export default function Home() {
       ])
 
       try {
+        // Голосовое управление музыкой: «выключи музыку» — гасим плеер без LLM
+        if (MUSIC_STOP_RE.test(text) && MUSIC_TOPIC_RE.test(text)) {
+          tts.stop()
+          setMusic(null)
+          assistantLocalReply('Хорошо, выключила музыку 🎧')
+          return
+        }
+
+        // Голосовое управление музыкой: «включи песню…» — ищем и играем
+        if (MUSIC_TRIGGER_RE.test(text) && MUSIC_TOPIC_RE.test(text)) {
+          const query =
+            text
+              .replace(MUSIC_TRIGGER_RE, '')
+              .replace(/\s*пожалуйста\s*/gi, ' ')
+              .trim()
+              .slice(0, 120) || 'музыка'
+          const res = await fetch('/api/music', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query }),
+          })
+          if (!res.ok) throw new Error('nothing found')
+          const json = (await res.json()) as { track?: { videoId: string; title: string; url: string } }
+          if (!json.track) throw new Error('nothing found')
+          tts.stop()
+          setMusic({ videoId: json.track.videoId, title: json.track.title, url: json.track.url })
+          assistantLocalReply(`Включаю «${json.track.title}» 🎵\n${json.track.url}`)
+          return
+        }
+
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -167,7 +223,7 @@ export default function Home() {
         setBusy(false)
       }
     },
-    [activeCharacter, toast, tts]
+    [activeCharacter, assistantLocalReply, toast, tts]
   )
 
   // ─── Микрофон ───────────────────────────────────────────────────────────
@@ -222,9 +278,10 @@ export default function Home() {
       setInterim('')
       return
     }
-    // Перебивание: глушим ассистента и слушаем
+    // Перебивание: глушим ассистента и музыку, слушаем
     setMicOn(true)
     tts.stop()
+    setMusic(null)
     recognition.start()
   }, [recognition, setMicOn, toast, tts])
 
@@ -232,18 +289,18 @@ export default function Home() {
     setMicListening(recognition.listening)
   }, [recognition.listening])
 
-  // Пока ассистент говорит — приглушаем микрофон (он не слышит сам себя),
-  // после озвучки возвращаем с паузой на затухание звука
+  // Пока звучит голос ассистента или музыка — приглушаем микрофон (он не слышит
+  // сам себя), после тишины возвращаем с паузой на затухание звука
+  const audible = tts.speaking || music !== null
   useEffect(() => {
-    const speaking = tts.speaking
-    if (speaking && !wasSpeakingRef.current) {
+    if (audible && !wasSpeakingRef.current) {
       wasSpeakingRef.current = true
       if (resumeTimerRef.current) {
         clearTimeout(resumeTimerRef.current)
         resumeTimerRef.current = null
       }
       recognition.pause()
-    } else if (!speaking && wasSpeakingRef.current) {
+    } else if (!audible && wasSpeakingRef.current) {
       wasSpeakingRef.current = false
       echoMuteUntilRef.current = Date.now() + ECHO_GRACE_MS
       if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current)
@@ -252,7 +309,7 @@ export default function Home() {
         if (micDesiredRef.current) recognition.resume()
       }, ECHO_GRACE_MS)
     }
-  }, [tts.speaking, recognition.pause, recognition.resume])
+  }, [audible, recognition.pause, recognition.resume])
 
   useEffect(
     () => () => {
@@ -264,7 +321,7 @@ export default function Home() {
   // ─── Состояние ассистента для орбиса ────────────────────────────────────
   const assistantState: AssistantState = micListening
     ? 'listening'
-    : tts.speaking
+    : tts.speaking || music !== null
       ? 'speaking'
       : busy
         ? 'thinking'
@@ -314,6 +371,7 @@ export default function Home() {
   const clearChat = useCallback(async () => {
     if (!activeCharacter) return
     tts.stop()
+    setMusic(null)
     try {
       await fetch(`/api/messages?characterId=${encodeURIComponent(activeCharacter.id)}`, {
         method: 'DELETE',
@@ -405,7 +463,11 @@ export default function Home() {
 
             <div className="flex flex-col items-center gap-1.5 text-center">
               <p className="text-sm font-medium text-white/85">
-                {assistantState === 'idle' ? greeting : STATUS_TEXT[assistantState]}
+                {music
+                  ? '♪ Музыка играет'
+                  : assistantState === 'idle'
+                    ? greeting
+                    : STATUS_TEXT[assistantState]}
               </p>
               {interim ? (
                 <p className="max-w-md text-sm italic text-white/45">«{interim}»</p>
@@ -414,8 +476,8 @@ export default function Home() {
               )}
             </div>
 
-            {/* Быстрые подсказки — только в покое и пустой истории */}
-            {assistantState === 'idle' && messages.length === 0 && (
+            {/* Быстрые подсказки — когда ассистент в покое (не зависят от истории чата) */}
+            {assistantState === 'idle' && (
               <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
                 {QUICK_PROMPTS.map((prompt) => (
                   <button
@@ -432,6 +494,19 @@ export default function Home() {
 
           {/* Панель ввода */}
           <div className="w-full max-w-2xl">
+            {/* Плеер: музыка играет даже при скрытом диалоге */}
+            {music && (
+              <div className="mb-2.5">
+                <MusicPlayer
+                  videoId={music.videoId}
+                  title={music.title}
+                  url={music.url}
+                  accent={accent}
+                  onClose={() => setMusic(null)}
+                />
+              </div>
+            )}
+
             {/* Переключатели */}
             <div className="mb-2.5 flex flex-wrap items-center justify-center gap-2">
               <ToggleChip
@@ -483,14 +558,14 @@ export default function Home() {
                 title={
                   micListening
                     ? 'Остановить'
-                    : micDesired && tts.speaking
-                      ? 'Микрофон притушён, пока я говорю — кликни, чтобы перебить'
+                    : micDesired && (tts.speaking || music !== null)
+                      ? 'Играет музыка или мой голос — кликни, чтобы перебить'
                       : 'Говорить голосом'
                 }
               >
                 {micListening ? (
                   <Square className="size-4" />
-                ) : micDesired && tts.speaking ? (
+                ) : micDesired && (tts.speaking || music !== null) ? (
                   <MicOff className="size-5 opacity-50" />
                 ) : (
                   <Mic className="size-5" />
@@ -526,7 +601,7 @@ export default function Home() {
             <p className="mt-2 text-center text-[11px] text-white/25">
               Enter — отправить · Shift+Enter — новая строка · Клик по микрофону во время ответа — перебить
               <br />
-              Пока ассистент говорит, микрофон притушён — он не слышит сам себя
+              Скажи «включи песню…» или «спокойную музыку» — найду и заиграю · Микрофон притушён, пока я говорю или играет музыка
             </p>
           </div>
         </section>

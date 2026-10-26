@@ -271,13 +271,14 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
       // Если контекст не ожил (нет активации пользователя, политика
       // автовоспроизведения) — бросаем ошибку и уходим в системный fallback:
       // иначе насос очереди зависнет навсегда на источнике, который молчит
-      if (ctx.state !== 'running') {
+      // (state приводим к string: lib-типы окружения не знают 'running')
+      if ((ctx.state as string) !== 'running') {
         try {
           await ctx.resume()
         } catch {
           /* ignore */
         }
-        if (ctx.state !== 'running') throw new Error('AudioContext не активен')
+        if ((ctx.state as string) !== 'running') throw new Error('AudioContext не активен')
       }
       const buffer = await ctx.decodeAudioData(bytes)
       if (generation !== generationRef.current) return

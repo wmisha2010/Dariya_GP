@@ -4,6 +4,47 @@ import { memo, useEffect, useRef } from 'react'
 import type { ChatMessage } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
+/** Ссылки в тексте (http/https/www) делаем кликабельными */
+const URL_RE = /(https?:\/\/[^\s<>"')\]]+|www\.[^\s<>"')\]]+)/gi
+
+function LinkifiedText({ text, accent }: { text: string; accent: string }) {
+  const parts: Array<string | { url: string; label: string }> = []
+  let last = 0
+  for (const match of text.matchAll(URL_RE)) {
+    const idx = match.index ?? 0
+    const raw = match[0]
+    // Отделяем хвостовую пунктуацию от самой ссылки: «https://…».
+    const trimmed = raw.replace(/[.,!?;:…]+$/, '')
+    if (!trimmed) continue
+    if (idx > last) parts.push(text.slice(last, idx))
+    parts.push({ url: trimmed.startsWith('www.') ? `https://${trimmed}` : trimmed, label: trimmed })
+    if (trimmed.length < raw.length) parts.push(raw.slice(trimmed.length))
+    last = idx + raw.length
+  }
+  if (last < text.length) parts.push(text.slice(last))
+
+  return (
+    <p className="whitespace-pre-wrap break-words">
+      {parts.map((part, i) =>
+        typeof part === 'string' ? (
+          part
+        ) : (
+          <a
+            key={i}
+            href={part.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline decoration-dotted underline-offset-2 transition-opacity hover:opacity-80"
+            style={{ color: accent }}
+          >
+            {part.label}
+          </a>
+        )
+      )}
+    </p>
+  )
+}
+
 interface ChatPanelProps {
   messages: ChatMessage[]
   streamingText: string
@@ -93,7 +134,7 @@ function MessageBubble({ role, content, accent, characterName, streaming }: Mess
             {characterName}
           </div>
         )}
-        <p className="whitespace-pre-wrap break-words">{content}</p>
+        <LinkifiedText text={content} accent={accent} />
       </div>
     </div>
   )
