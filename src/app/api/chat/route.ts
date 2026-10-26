@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server'
 import ZAI from 'z-ai-web-dev-sdk'
 import { db } from '@/lib/db'
+import { createGeminiStream, getGeminiKey, type GeminiTurn } from '@/lib/gemini'
 
 export const maxDuration = 300
 
@@ -28,6 +29,10 @@ function getZai() {
   }
   return zaiPromise
 }
+
+type ZaiClient = Awaited<ReturnType<typeof getZai>>
+type ZaiUpstream = Awaited<ReturnType<ZaiClient['chat']['completions']['create']>>
+type ChatUpstream = ReadableStream<Uint8Array> | ZaiUpstream | null
 
 /** Гварды частоты фоновых LLM-вызовов — бережём rate-limit API */
 let lastExtractAt = 0
@@ -250,26 +255,64 @@ export async function POST(req: NextRequest) {
         })),
     ]
 
-    const zai = await getZai()
-    // До 4 попыток с паузами: при частой переписке API иногда отдаёт 429 —
-    // перегрузка обычно проходит за секунды, добиваем молча на сервере
-    let upstream: Awaited<ReturnType<typeof zai.chat.completions.create>> | null = null
+    // История для Gemini: чередование user/model строгое, первым — пользователь.
+    // Ведущие реплики ассистента пропускаем, дубли ролей склеиваем.
+    const geminiTurns: GeminiTurn[] = []
+    for (const m of history.slice().reverse()) {
+      const role: 'user' | 'model' = m.role === 'user' ? 'user' : 'model'
+      const text = m.content.slice(0, HISTORY_MSG_MAX)
+      if (geminiTurns.length === 0 && role === 'model') continue
+      const prev = geminiTurns[geminiTurns.length - 1]
+      if (prev && prev.role === role) {
+        prev.parts[0].text += `\n${text}`
+        continue
+      }
+      geminiTurns.push({ role, parts: [{ text }] })
+    }
+    if (geminiTurns.length === 0) {
+      geminiTurns.push({ role: 'user', parts: [{ text: userText }] })
+    }
+
+    // ─── Провайдеры: Gemini (если задан GEMINI_API_KEY) → Z.ai ──────────────
+    // Gemini бесплатен и стабилен — идёт первым; любой его сбой (лимит,
+    // блокировка, сеть) молча откатывается на основной шлюз
+    let upstream: ChatUpstream = null
     let lastChatError: unknown = null
-    for (let attempt = 0; attempt < 4; attempt++) {
+
+    const geminiKey = getGeminiKey()
+    if (geminiKey) {
       try {
-        upstream = await zai.chat.completions.create({
-          messages: chatMessages,
-          stream: true,
-          thinking: { type: 'disabled' },
+        upstream = await createGeminiStream({
+          apiKey: geminiKey,
+          system: systemParts.join('\n\n'),
+          turns: geminiTurns,
         })
-        lastChatError = null
-        break
       } catch (error) {
         lastChatError = error
-        const message = error instanceof Error ? error.message : String(error)
-        const isRateLimit = message.includes('429') || message.toLowerCase().includes('too many')
-        if (!isRateLimit || attempt === 3) break
-        await sleep([1500, 3000, 5000][attempt])
+        console.error('Gemini недоступен, переключаюсь на Z.ai:', error)
+      }
+    }
+
+    if (!upstream) {
+      const zai = await getZai()
+      // До 4 попыток с паузами: при частой переписке API иногда отдаёт 429 —
+      // перегрузка обычно проходит за секунды, добиваем молча на сервере
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          upstream = await zai.chat.completions.create({
+            messages: chatMessages,
+            stream: true,
+            thinking: { type: 'disabled' },
+          })
+          lastChatError = null
+          break
+        } catch (error) {
+          lastChatError = error
+          const message = error instanceof Error ? error.message : String(error)
+          const isRateLimit = message.includes('429') || message.toLowerCase().includes('too many')
+          if (!isRateLimit || attempt === 3) break
+          await sleep([1500, 3000, 5000][attempt])
+        }
       }
     }
     if (!upstream) {
@@ -280,9 +323,10 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    // Если SDK вернул готовый JSON (нет SSE) — отдаём одним куском
-    if (!upstream || typeof upstream.getReader !== 'function') {
-      const full: string = upstream?.choices?.[0]?.message?.content ?? ''
+    // Если провайдер вернул готовый JSON (нет SSE) — отдаём одним куском
+    if (!upstream || typeof (upstream as { getReader?: unknown }).getReader !== 'function') {
+      const full: string =
+        (upstream as ZaiUpstream)?.choices?.[0]?.message?.content ?? ''
       await db.message.create({
         data: { characterId: character.id, role: 'assistant', content: full },
       })
