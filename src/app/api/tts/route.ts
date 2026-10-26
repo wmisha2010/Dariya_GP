@@ -168,6 +168,17 @@ async function requestTts(text: string, rate: number, pitch: number): Promise<Bu
   return audio
 }
 
+/** Прогрев: клиент вызывает при загрузке страницы — сокет Edge открывается
+ * заранее, чтобы первая фраза ответа не ждала установку соединения */
+export async function GET() {
+  try {
+    await getEdgeTts()
+    return Response.json({ ok: true, provider: 'edge' })
+  } catch {
+    return Response.json({ ok: false, provider: 'unavailable' })
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as TtsRequestBody

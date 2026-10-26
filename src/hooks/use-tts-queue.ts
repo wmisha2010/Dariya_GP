@@ -28,13 +28,26 @@ const SERVER_EMOTION_PROSODY: Record<Emotion, { rate: number; pitch: number }> =
   thoughtful: { rate: 7, pitch: -8 },
 }
 
-/** Эмоциональные профили системного синтеза (fallback) — темп повышен, паузы короче */
-const BROWSER_EMOTION_PROFILE: Record<Emotion, { pitch: number; rate: number; pause: number }> = {
-  neutral: { pitch: 1.0, rate: 1.12, pause: 100 },
-  excited: { pitch: 1.15, rate: 1.2, pause: 140 },
-  question: { pitch: 1.07, rate: 1.1, pause: 170 },
-  sympathy: { pitch: 0.93, rate: 0.98, pause: 220 },
-  thoughtful: { pitch: 0.97, rate: 0.96, pause: 240 },
+/** Эмоциональные профили системного синтеза (fallback) — темп повышен */
+const BROWSER_EMOTION_PROFILE: Record<Emotion, { pitch: number; rate: number }> = {
+  neutral: { pitch: 1.0, rate: 1.12 },
+  excited: { pitch: 1.15, rate: 1.2 },
+  question: { pitch: 1.07, rate: 1.1 },
+  sympathy: { pitch: 0.93, rate: 0.98 },
+  thoughtful: { pitch: 0.97, rate: 0.96 },
+}
+
+/**
+ * Пауза между предложениями (мс). Нейроголос уже интонирует конец фразы,
+ * поэтому пауза короткая — длинные технические зазоры звучат как «затык».
+ * Реальный зазор = пауза + хвостовая тишина внутри MP3 (~80-120мс).
+ */
+const INTER_PHRASE_PAUSE: Record<Emotion, number> = {
+  neutral: 70,
+  excited: 50,
+  question: 110,
+  sympathy: 150,
+  thoughtful: 170,
 }
 
 const EXCITED_RE =
@@ -47,7 +60,7 @@ const EMOJI_RE = /[\p{Extended_Pictographic}\u200d\uFE0F\u20E3]/gu
 const FEMALE_HINTS = /(svetlana|milena|alena|katya|katia|irina|tatyana|female|жен)/i
 const MALE_HINTS = /(yuri|dmitri|pavel|dariy|artemiy|aleksei|alexey|male|муж)/i
 
-const PUMP_TICK_MS = 80
+const PUMP_TICK_MS = 40
 const SENTENCE_END = /[.!?…]$/
 /** Ждём появления системных голосов перед fallback-озвучкой */
 const VOICES_WAIT_MS = 1500
@@ -58,6 +71,8 @@ const MAX_SENTENCE_CHARS = 260
 const SERVER_FAIL_THRESHOLD = 2
 /** Длительность cooldown серверного голоса после неудач */
 const SERVER_COOLDOWN_MS = 90_000
+/** Сколько фраз одновременно качаем фоном (сокет Edge мультиплексируется по requestId) */
+const MAX_PREFETCH = 3
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v))
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -152,6 +167,9 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
   const voicesRef = useRef<SpeechSynthesisVoice[]>([])
   const serverFailCountRef = useRef(0)
   const serverCooldownUntilRef = useRef(0)
+  /** Prefetch: аудио фраз, скачанных заранее — убирает паузы между предложениями */
+  const audioPrefetchRef = useRef(new Map<string, Promise<ArrayBuffer | null>>())
+  const inflightPrefetchRef = useRef(0)
   const optsRef = useRef({ pitch, rate, gender, onFinish })
 
   useEffect(() => {
@@ -209,6 +227,7 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
     queueRef.current = []
     pendingRef.current = ''
     utterRef.current = null
+    audioPrefetchRef.current.clear()
     if (sourceRef.current) {
       try {
         sourceRef.current.stop()
@@ -296,6 +315,73 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
     [ensureCtx]
   )
 
+  /** Скачиваем аудио фразы с сервера (null при сбое — фраза уйдёт в системный синтез) */
+  const fetchServerAudio = useCallback(async (clean: string): Promise<ArrayBuffer | null> => {
+    // Просодия эмоций считается на сервере и попадает в ключ кэша
+    const prosody = SERVER_EMOTION_PROSODY[detectEmotion(clean)]
+    // Таймаут fetch: подвисший запрос не должен блокировать очередь озвучки
+    const controller = new AbortController()
+    const fetchTimeout = setTimeout(() => controller.abort(), 10_000)
+    try {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: clean.slice(0, 800),
+          rate: prosody.rate,
+          pitch: prosody.pitch,
+        }),
+        signal: controller.signal,
+      })
+      if (!res.ok) throw new Error(`TTS ${res.status}`)
+      const bytes = await res.arrayBuffer()
+      serverFailCountRef.current = 0
+      return bytes
+    } catch {
+      // Серверный голос не сработал (в т.ч. таймаут) — копим неудачи
+      // и включаем cooldown, фразу произнесёт системный синтез
+      serverFailCountRef.current++
+      if (serverFailCountRef.current >= SERVER_FAIL_THRESHOLD) {
+        serverCooldownUntilRef.current = Date.now() + SERVER_COOLDOWN_MS
+        serverFailCountRef.current = 0
+      }
+      return null
+    } finally {
+      clearTimeout(fetchTimeout)
+    }
+  }, [])
+
+  /** Стартует фоновую загрузку аудио фразы (если она ещё не качается) */
+  const startPrefetch = useCallback(
+    (clean: string): boolean => {
+      if (audioPrefetchRef.current.has(clean)) return false
+      if (inflightPrefetchRef.current >= MAX_PREFETCH) return false
+      inflightPrefetchRef.current++
+      const promise = fetchServerAudio(clean).finally(() => {
+        inflightPrefetchRef.current--
+      })
+      audioPrefetchRef.current.set(clean, promise)
+      return true
+    },
+    [fetchServerAudio]
+  )
+
+  /** Качаем аудио первых фраз очереди заранее — между предложениями не будет тишины */
+  const ensurePrefetch = useCallback(
+    (generation: number) => {
+      if (generation !== generationRef.current) return
+      if (Date.now() < serverCooldownUntilRef.current) return
+      let freeSlots = MAX_PREFETCH - inflightPrefetchRef.current
+      for (const item of queueRef.current) {
+        if (freeSlots <= 0) return
+        const clean = cleanForSpeech(item)
+        if (!clean || audioPrefetchRef.current.has(clean)) continue
+        if (startPrefetch(clean)) freeSlots--
+      }
+    },
+    [startPrefetch]
+  )
+
   /** Озвучиваем фразу системным синтезом (fallback) с эмоциональными параметрами */
   const speakBrowser = useCallback((text: string, generation: number): Promise<void> => {
     return new Promise<void>((resolve) => {
@@ -342,48 +428,35 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
     })
   }, [])
 
-  /** Озвучка одной фразы: серверный нейроголос, при сбое — системный */
+  /**
+   * Озвучка одной фразы: серверный нейроголос, при сбое — системный.
+   * Аудио почти всегда уже скачано фоном (prefetch) — играем сразу,
+   * без сетевой тишины между предложениями.
+   */
   const speakSentence = useCallback(
     async (sentence: string, generation: number): Promise<void> => {
       const clean = cleanForSpeech(sentence)
       if (!clean) return
 
-      const cooldownActive = Date.now() < serverCooldownUntilRef.current
-      if (!cooldownActive) {
-        // Просодия эмоций считается на сервере и попадает в ключ кэша
-        const emotion = detectEmotion(clean)
-        const prosody = SERVER_EMOTION_PROSODY[emotion]
-        // Таймаут fetch: подвисший запрос не должен блокировать очередь озвучки
-        const controller = new AbortController()
-        const fetchTimeout = setTimeout(() => controller.abort(), 10_000)
+      let prefetched = audioPrefetchRef.current.get(clean) ?? null
+      audioPrefetchRef.current.delete(clean)
+      // Не успели prefetch'нуть (первая фраза, лимит одновременных) — качаем сейчас
+      if (!prefetched && Date.now() >= serverCooldownUntilRef.current) {
+        prefetched = fetchServerAudio(clean)
+      }
+
+      let bytes: ArrayBuffer | null = null
+      if (prefetched) {
+        bytes = await prefetched
+        if (generation !== generationRef.current) return
+      }
+
+      if (bytes) {
         try {
-          const res = await fetch('/api/tts', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text: clean.slice(0, 800),
-              rate: prosody.rate,
-              pitch: prosody.pitch,
-            }),
-            signal: controller.signal,
-          })
-          if (!res.ok) throw new Error(`TTS ${res.status}`)
-          const bytes = await res.arrayBuffer()
-          clearTimeout(fetchTimeout)
-          if (generation !== generationRef.current) return
           await playServerAudio(bytes, clean, generation)
-          serverFailCountRef.current = 0
           return
-        } catch (error) {
-          clearTimeout(fetchTimeout)
-          if (generation !== generationRef.current) return
-          // Серверный голос не сработал (в т.ч. таймаут) — копим неудачи
-          // и включаем cooldown, фразу произнесёт системный синтез
-          serverFailCountRef.current++
-          if (serverFailCountRef.current >= SERVER_FAIL_THRESHOLD) {
-            serverCooldownUntilRef.current = Date.now() + SERVER_COOLDOWN_MS
-            serverFailCountRef.current = 0
-          }
+        } catch {
+          // WebAudio не смог (контекст не активен и т.п.) — уходим в системный синтез
         }
       }
 
@@ -391,7 +464,7 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
       if (generation !== generationRef.current) return
       await speakBrowser(clean, generation)
     },
-    [playServerAudio, speakBrowser]
+    [fetchServerAudio, playServerAudio, speakBrowser]
   )
 
   /** Насос очереди: берёт предложения и озвучивает их по порядку */
@@ -413,14 +486,16 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
           await speakSentence(sentence, generation)
           if (generation !== generationRef.current) return
 
-          // Живая пауза между фразами (короче — разговор бодрее)
+          // Следующие фразы качаем фоном прямо сейчас — пока звучит пауза
+          ensurePrefetch(generation)
+
+          // Живая пауза между фразами (короткая — разговор бодрее)
           const hasMore =
             queueRef.current.length > 0 || !streamEndedRef.current || pendingRef.current.length > 0
           if (hasMore) {
             const clean = cleanForSpeech(sentence) || sentence
-            const prof = BROWSER_EMOTION_PROFILE[detectEmotion(clean)]
             const tail = /[…]$/.test(clean) ? 120 : 0
-            await sleep(prof.pause + tail)
+            await sleep(INTER_PHRASE_PAUSE[detectEmotion(clean)] + tail)
           }
         }
         finish(generation)
@@ -428,7 +503,7 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
         pumpingRef.current = false
       }
     },
-    [speakSentence]
+    [ensurePrefetch, speakSentence]
   )
 
   const splitIntoSentences = (text: string): string[] => {
@@ -469,6 +544,7 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
       if (!pumpingRef.current && queueRef.current.length === 0 && pendingRef.current === '') {
         generationRef.current++
         streamEndedRef.current = false
+        audioPrefetchRef.current.clear()
       }
       pendingRef.current = `${pendingRef.current} ${text}`.trim()
       const sentences = splitIntoSentences(pendingRef.current)
@@ -483,9 +559,11 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
         queueRef.current.push(...sentences)
         pendingRef.current = tail ?? ''
       }
+      // Аудио новых фраз качается фоном, пока звучит текущая
+      ensurePrefetch(generationRef.current)
       void pump(generationRef.current)
     },
-    [pump]
+    [ensurePrefetch, pump]
   )
 
   /** Сообщить, что стрим закончен — доигрываем накопленный хвост */
@@ -495,8 +573,9 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
       pendingRef.current = ''
     }
     streamEndedRef.current = true
+    ensurePrefetch(generationRef.current)
     void pump(generationRef.current)
-  }, [pump])
+  }, [ensurePrefetch, pump])
 
   /** Озвучить готовый текст целиком (не из стрима) */
   const speak = useCallback(
@@ -508,6 +587,14 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
     },
     [enqueue, endStream, stop]
   )
+
+  // Прогреваем серверный нейроголос сразу при загрузке: Edge-сокет откроется
+  // заранее, и первая фраза ответа не будет ждать установку соединения 1-2с
+  useEffect(() => {
+    fetch('/api/tts').catch(() => {
+      /* прогрев не критичен */
+    })
+  }, [])
 
   // Прогреваем список голосов и аудиоконтекст по первому взаимодействию
   useEffect(() => {
