@@ -122,17 +122,19 @@ export default function Home() {
         if (voiceOnRef.current) tts.endStream()
 
         setStreamingText('')
-        if (full.trim()) {
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `assistant-${Date.now()}`,
-              role: 'assistant',
-              content: full.trim(),
-              createdAt: new Date().toISOString(),
-            },
-          ])
+        if (!full.trim()) {
+          // Пустой ответ — не тишина, а понятное сообщение
+          throw new Error('Ассистент не успел ответить — попробуй ещё раз')
         }
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `assistant-${Date.now()}`,
+            role: 'assistant',
+            content: full.trim(),
+            createdAt: new Date().toISOString(),
+          },
+        ])
       } catch (error) {
         setStreamingText('')
         toast({
@@ -374,8 +376,8 @@ export default function Home() {
                 label="Озвучка ответов"
                 title={
                   tts.voiceName
-                    ? `Русский голос: ${tts.voiceName} (нейроголоса Edge звучат лучше всего)`
-                    : 'Русский голос не найден: установите системный русский голос или откройте в Edge/Chrome'
+                    ? `Озвучка: нейроголос сервера (Google RU) · резерв браузера: ${tts.voiceName}`
+                    : 'Озвучка: нейроголос сервера (Google RU) · резерв — системный голос'
                 }
               />
               <ToggleChip
@@ -445,7 +447,7 @@ export default function Home() {
         </section>
 
         {/* Чат */}
-        <aside className="flex h-[46vh] w-full flex-col overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03] backdrop-blur-md lg:h-auto lg:w-[400px] lg:shrink-0">
+        <aside className="flex h-[46vh] w-full flex-col overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03] backdrop-blur-md lg:h-[calc(100vh-7.5rem)] lg:min-h-0 lg:w-[400px] lg:shrink-0">
           <div className="flex items-center justify-between border-b border-white/5 px-4 py-3">
             <div className="flex items-center gap-2">
               <span

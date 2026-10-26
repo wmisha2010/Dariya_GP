@@ -10,8 +10,22 @@ interface ChatRequestBody {
   search?: boolean
 }
 
-const HISTORY_LIMIT = 16
-const MEMORY_LIMIT = 30
+const HISTORY_LIMIT = 12
+const MEMORY_LIMIT = 15
+/** Обрезка длинных реплик в истории — экономим токены и лимиты API */
+const HISTORY_MSG_MAX = 500
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** Гварды частоты фоновых LLM-вызовов — бережём rate-limit API */
+let lastExtractAt = 0
+const EXTRACT_MIN_INTERVAL = 15_000
+let lastDiaryAt = 0
+const DIARY_MIN_INTERVAL = 30_000
+
+/** Маркеры того, что в реплике может быть устойчивый факт о пользователе */
+const FACT_HINT_RE =
+  /(меня зовут|мне \d+|я работаю|я живу|я учусь|я ?не (люблю|ем|пью)|люблю|ненавижу|предпочитаю|нравится|увлекаюсь|у меня есть|у меня (есть|живет|работает)|хочу|планирую|собираюсь|мечтаю|мой |моя |мои |зовите меня)/i
 
 function todayDay(): string {
   // Локальная дата в формате YYYY-MM-DD (по серверному времени)
@@ -22,6 +36,12 @@ function todayDay(): string {
 
 /** Фоновое извлечение фактов о пользователе из его сообщения */
 async function extractMemoriesInBackground(userText: string): Promise<void> {
+  // Короткие реплики («привет», «ок») фактов не содержат — не тратим вызовы API
+  const text = userText.trim()
+  if (text.length < 15 || !FACT_HINT_RE.test(text)) return
+  const now = Date.now()
+  if (now - lastExtractAt < EXTRACT_MIN_INTERVAL) return
+  lastExtractAt = now
   try {
     const zai = await ZAI.create()
     const res = await zai.chat.completions.create({
@@ -67,9 +87,10 @@ async function updateDiaryInBackground(
   userText: string,
   assistantText: string
 ): Promise<void> {
+  const now = Date.now()
+  if (now - lastDiaryAt < DIARY_MIN_INTERVAL) return
+  lastDiaryAt = now
   try {
-    // Небольшая пауза, чтобы не создавать всплеск LLM-запросов вместе с извлечением памяти
-    await new Promise((resolve) => setTimeout(resolve, 3000))
     const day = todayDay()
     const existing = await db.diaryEntry.findUnique({ where: { day } })
     const zai = await ZAI.create()
@@ -200,15 +221,40 @@ export async function POST(req: NextRequest) {
       ...history
         .slice()
         .reverse()
-        .map((m) => ({ role: m.role === 'user' ? ('user' as const) : ('assistant' as const), content: m.content })),
+        .map((m) => ({
+          role: m.role === 'user' ? ('user' as const) : ('assistant' as const),
+          content: m.content.slice(0, HISTORY_MSG_MAX),
+        })),
     ]
 
     const zai = await ZAI.create()
-    const upstream = await zai.chat.completions.create({
-      messages: chatMessages,
-      stream: true,
-      thinking: { type: 'disabled' },
-    })
+    // До 3 попыток с паузой: при частой переписке API иногда отдаёт 429
+    let upstream: Awaited<ReturnType<typeof zai.chat.completions.create>> | null = null
+    let lastChatError: unknown = null
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        upstream = await zai.chat.completions.create({
+          messages: chatMessages,
+          stream: true,
+          thinking: { type: 'disabled' },
+        })
+        lastChatError = null
+        break
+      } catch (error) {
+        lastChatError = error
+        const message = error instanceof Error ? error.message : String(error)
+        const isRateLimit = message.includes('429') || message.toLowerCase().includes('too many')
+        if (!isRateLimit || attempt === 2) break
+        await sleep(3000 * (attempt + 1))
+      }
+    }
+    if (!upstream) {
+      console.error('POST /api/chat error:', lastChatError)
+      return new Response(
+        JSON.stringify({ error: 'Ассистент сейчас перегружен — попробуй ещё раз через минуту' }),
+        { status: 503, headers: { 'Content-Type': 'application/json' } }
+      )
+    }
 
     // Если SDK вернул готовый JSON (нет SSE) — отдаём одним куском
     if (!upstream || typeof upstream.getReader !== 'function') {
@@ -240,7 +286,16 @@ export async function POST(req: NextRequest) {
             data: { characterId: character.id, role: 'assistant', content: text },
           })
           void extractMemoriesInBackground(userText)
-          void updateDiaryInBackground(character.name, userText, text)
+          // Дневник обновляем максимум раз в 30с и примерно каждый 3-й ответ:
+          // экономим LLM-вызовы, чтобы не упираться в rate-limit
+          const startOfDay = new Date()
+          startOfDay.setHours(0, 0, 0, 0)
+          const todayCount = await db.message.count({
+            where: { characterId: character.id, createdAt: { gte: startOfDay } },
+          })
+          if (todayCount % 3 === 1) {
+            void updateDiaryInBackground(character.name, userText, text)
+          }
         } catch (error) {
           console.error('saveAssistant error:', error)
         }
@@ -284,12 +339,11 @@ export async function POST(req: NextRequest) {
           controller.close()
         } catch (error) {
           console.error('chat stream error:', error)
-          if (assistantText) {
-            try {
-              controller.enqueue(encoder.encode(''))
-            } catch {
-              // поток уже закрыт
-            }
+          // Не оставляем пользователя с тишиной: видимая пометка об обрыве
+          try {
+            controller.enqueue(encoder.encode('\n(связь с моделью оборвалась — напиши ещё раз)'))
+          } catch {
+            // поток уже закрыт
           }
           controller.close()
         } finally {
@@ -316,9 +370,9 @@ export async function POST(req: NextRequest) {
     })
   } catch (error) {
     console.error('POST /api/chat error:', error)
-    return new Response(JSON.stringify({ error: 'Ассистент не смог ответить. Попробуйте ещё раз.' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' },
-    })
+    return new Response(
+      JSON.stringify({ error: 'Ассистент сейчас перегружен — попробуй ещё раз через минуту' }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    )
   }
 }
