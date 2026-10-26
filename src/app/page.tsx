@@ -16,6 +16,7 @@ import {
   Brain,
   Globe,
   Mic,
+  MicOff,
   SendHorizontal,
   Sparkles,
   Square,
@@ -29,6 +30,9 @@ const QUICK_PROMPTS = [
   'Помоги спланировать день',
   'Придумай 5 названий для блога о путешествиях',
 ]
+
+/** Пауза после конца озвучки, прежде чем снова включать микрофон (затухание эха) */
+const ECHO_GRACE_MS = 700
 
 const STATUS_TEXT: Record<AssistantState, string> = {
   idle: 'Нажми микрофон или напиши сообщение',
@@ -64,6 +68,15 @@ export default function Home() {
   searchOnRef.current = searchOn
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
+  // ─── Эхо-защита: микрофон не должен слышать голос самого ассистента ─────
+  const [micDesired, setMicDesired] = useState(false) // пользователь включил микрофон
+  const micDesiredRef = useRef(false)
+  const ttsSpeakingRef = useRef(false)
+  const wasSpeakingRef = useRef(false)
+  const echoMuteUntilRef = useRef(0)
+  const resumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastBusyToastRef = useRef(0)
+
   // ─── Озвучка: системный русский голос + эмоции ──────────────────────────
   const characterGender = (activeCharacter?.voicePitch ?? 1) < 0.95 ? 'male' : 'female'
   const tts = useTtsQueue({
@@ -71,6 +84,10 @@ export default function Home() {
     rate: activeCharacter?.voiceRate ?? 1,
     gender: characterGender,
   })
+
+  ttsSpeakingRef.current = tts.speaking
+  /** Всё услышанное во время озвучки и сразу после — эхо, а не речь пользователя */
+  const isEcho = () => ttsSpeakingRef.current || Date.now() < echoMuteUntilRef.current
 
   // ─── Отправка сообщения ─────────────────────────────────────────────────
   const send = useCallback(
@@ -152,9 +169,23 @@ export default function Home() {
 
   // ─── Микрофон ───────────────────────────────────────────────────────────
   const recognition = useSpeechRecognition({
-    onInterim: (text) => setInterim(text),
+    onInterim: (text) => {
+      if (isEcho()) return
+      setInterim(text)
+    },
     onFinal: (text) => {
-      if (text.trim()) void send(text)
+      if (isEcho()) return
+      const clean = text.trim()
+      if (!clean) return
+      if (sendingRef.current) {
+        // Ассистент ещё отвечает — не теряем молча, а подсказываем
+        if (Date.now() - lastBusyToastRef.current > 4000) {
+          lastBusyToastRef.current = Date.now()
+          toast({ title: 'Секунду…', description: 'Ассистент ещё отвечает — повтори сразу после' })
+        }
+        return
+      }
+      void send(clean)
     },
     onError: (code) => {
       toast({
@@ -168,6 +199,11 @@ export default function Home() {
     },
   })
 
+  const setMicOn = useCallback((on: boolean) => {
+    micDesiredRef.current = on
+    setMicDesired(on)
+  }, [])
+
   const toggleMic = useCallback(() => {
     if (!recognition.supported) {
       toast({
@@ -178,18 +214,49 @@ export default function Home() {
       return
     }
     if (recognition.listening) {
+      setMicOn(false)
       recognition.stop()
       setInterim('')
       return
     }
     // Перебивание: глушим ассистента и слушаем
+    setMicOn(true)
     tts.stop()
     recognition.start()
-  }, [recognition, toast, tts])
+  }, [recognition, setMicOn, toast, tts])
 
   useEffect(() => {
     setMicListening(recognition.listening)
   }, [recognition.listening])
+
+  // Пока ассистент говорит — приглушаем микрофон (он не слышит сам себя),
+  // после озвучки возвращаем с паузой на затухание звука
+  useEffect(() => {
+    const speaking = tts.speaking
+    if (speaking && !wasSpeakingRef.current) {
+      wasSpeakingRef.current = true
+      if (resumeTimerRef.current) {
+        clearTimeout(resumeTimerRef.current)
+        resumeTimerRef.current = null
+      }
+      recognition.pause()
+    } else if (!speaking && wasSpeakingRef.current) {
+      wasSpeakingRef.current = false
+      echoMuteUntilRef.current = Date.now() + ECHO_GRACE_MS
+      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current)
+      resumeTimerRef.current = setTimeout(() => {
+        resumeTimerRef.current = null
+        if (micDesiredRef.current) recognition.resume()
+      }, ECHO_GRACE_MS)
+    }
+  }, [tts.speaking, recognition.pause, recognition.resume])
+
+  useEffect(
+    () => () => {
+      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current)
+    },
+    []
+  )
 
   // ─── Состояние ассистента для орбиса ────────────────────────────────────
   const assistantState: AssistantState = micListening
@@ -244,12 +311,13 @@ export default function Home() {
     async (character: Character) => {
       if (character.id === activeCharacter?.id) return
       tts.stop()
+      setMicOn(false)
       recognition.stop()
       setActiveCharacter(character)
       setStreamingText('')
       await loadHistory(character.id)
     },
-    [activeCharacter?.id, loadHistory, recognition, tts]
+    [activeCharacter?.id, loadHistory, recognition, setMicOn, tts]
   )
 
   // ─── Очистить чат ───────────────────────────────────────────────────────
@@ -409,9 +477,21 @@ export default function Home() {
                     : { boxShadow: `inset 0 0 0 1px rgba(255,255,255,0.08)` }
                 }
                 aria-label={micListening ? 'Остановить микрофон' : 'Говорить'}
-                title={micListening ? 'Остановить' : 'Говорить голосом'}
+                title={
+                  micListening
+                    ? 'Остановить'
+                    : micDesired && tts.speaking
+                      ? 'Микрофон притушён, пока я говорю — кликни, чтобы перебить'
+                      : 'Говорить голосом'
+                }
               >
-                {micListening ? <Square className="size-4" /> : <Mic className="size-5" />}
+                {micListening ? (
+                  <Square className="size-4" />
+                ) : micDesired && tts.speaking ? (
+                  <MicOff className="size-5 opacity-50" />
+                ) : (
+                  <Mic className="size-5" />
+                )}
               </button>
 
               <Textarea
@@ -442,6 +522,8 @@ export default function Home() {
 
             <p className="mt-2 text-center text-[11px] text-white/25">
               Enter — отправить · Shift+Enter — новая строка · Клик по микрофону во время ответа — перебить
+              <br />
+              Пока ассистент говорит, микрофон притушён — он не слышит сам себя
             </p>
           </div>
         </section>

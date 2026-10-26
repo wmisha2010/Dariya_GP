@@ -59,6 +59,10 @@ export function useSpeechRecognition(options: UseSpeechRecognitionOptions = {}) 
 
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
   const wantActiveRef = useRef(false)
+  /** Микрофон приглушён (ассистент говорит) — намерение пользователя сохранено */
+  const pausedRef = useRef(false)
+  /** Последняя попытка start() — для backoff при мгновенных обрывах цикла */
+  const lastStartAttemptRef = useRef(0)
   const optionsRef = useRef({ onInterim, onFinal, onError })
 
   useEffect(() => {
@@ -82,6 +86,8 @@ export function useSpeechRecognition(options: UseSpeechRecognitionOptions = {}) 
     recognition.onstart = () => setListening(true)
 
     recognition.onresult = (event) => {
+      // Пока микрофон приглушён, всё услышанное — эхо, игнорируем
+      if (pausedRef.current) return
       let interim = ''
       let final = ''
       for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -112,23 +118,24 @@ export function useSpeechRecognition(options: UseSpeechRecognitionOptions = {}) 
 
     recognition.onend = () => {
       setListening(false)
-      // Перезапускаем, пока пользователь хочет слушать — эффект непрерывного микрофона
-      if (wantActiveRef.current) {
+      // Перезапускаем, пока пользователь хочет слушать и микрофон не приглушён
+      if (!wantActiveRef.current || pausedRef.current) return
+      const restart = () => {
+        if (!wantActiveRef.current || pausedRef.current) return
+        lastStartAttemptRef.current = Date.now()
         try {
           recognition.start()
         } catch {
           // start() может бросить, если recognition ещё останавливается — попробуем позже
-          setTimeout(() => {
-            if (wantActiveRef.current) {
-              try {
-                recognition.start()
-              } catch {
-                /* ignore */
-              }
-            }
-          }, 350)
+          setTimeout(restart, 350)
         }
       }
+      // Если предыдущая попытка старта была меньше 600мс назад — сессии
+      // обрываются мгновенно (нет аудиоустройства, сетевой сбой): не разгоняем
+      // цикл перезапуска до сотен раз в секунду
+      const sinceAttempt = Date.now() - lastStartAttemptRef.current
+      if (sinceAttempt < 600) setTimeout(restart, 500)
+      else restart()
     }
 
     recognitionRef.current = recognition
@@ -150,7 +157,9 @@ export function useSpeechRecognition(options: UseSpeechRecognitionOptions = {}) 
   const start = useCallback(() => {
     const recognition = recognitionRef.current
     if (!recognition) return
+    pausedRef.current = false
     wantActiveRef.current = true
+    lastStartAttemptRef.current = Date.now()
     try {
       recognition.start()
       setListening(true)
@@ -161,6 +170,7 @@ export function useSpeechRecognition(options: UseSpeechRecognitionOptions = {}) 
 
   const stop = useCallback(() => {
     wantActiveRef.current = false
+    pausedRef.current = false
     try {
       recognitionRef.current?.stop()
     } catch {
@@ -169,5 +179,44 @@ export function useSpeechRecognition(options: UseSpeechRecognitionOptions = {}) 
     setListening(false)
   }, [])
 
-  return { supported, listening, start, stop }
+  /**
+   * Приглушить микрофон, не теряя намерения пользователя (например, пока
+   * ассистент говорит — иначе он услышит сам себя и ответит на свои слова).
+   */
+  const pause = useCallback(() => {
+    if (!recognitionRef.current) return
+    pausedRef.current = true
+    try {
+      recognitionRef.current.abort()
+    } catch {
+      /* ignore */
+    }
+    setListening(false)
+  }, [])
+
+  /** Вернуть микрофон, если пользователь его включал и не выключал сам */
+  const resume = useCallback(() => {
+    if (!pausedRef.current) return
+    pausedRef.current = false
+    if (!wantActiveRef.current) return
+    const recognition = recognitionRef.current
+    if (!recognition) return
+    lastStartAttemptRef.current = Date.now()
+    try {
+      recognition.start()
+    } catch {
+      // recognition мог ещё останавливаться после abort — пробуем позже
+      setTimeout(() => {
+        if (wantActiveRef.current && !pausedRef.current) {
+          try {
+            recognitionRef.current?.start()
+          } catch {
+            /* ignore */
+          }
+        }
+      }, 350)
+    }
+  }, [])
+
+  return { supported, listening, start, stop, pause, resume }
 }

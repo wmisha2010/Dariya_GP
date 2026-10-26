@@ -246,39 +246,56 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
 
   /** Проигрываем MP3 с сервера с эмоциональным playbackRate */
   const playServerAudio = useCallback(
-    (bytes: ArrayBuffer, sentence: string, generation: number): Promise<void> => {
-      return new Promise((resolve, reject) => {
-        const ctx = ensureCtx()
-        if (!ctx) {
-          reject(new Error('WebAudio недоступен'))
-          return
+    async (bytes: ArrayBuffer, sentence: string, generation: number): Promise<void> => {
+      const ctx = ensureCtx()
+      if (!ctx) throw new Error('WebAudio недоступен')
+      // Если контекст не ожил (нет активации пользователя, политика
+      // автовоспроизведения) — бросаем ошибку и уходим в системный fallback:
+      // иначе насос очереди зависнет навсегда на источнике, который молчит
+      if (ctx.state !== 'running') {
+        try {
+          await ctx.resume()
+        } catch {
+          /* ignore */
         }
-        ctx
-          .decodeAudioData(bytes)
-          .then((buffer) => {
-            if (generation !== generationRef.current) {
-              resolve()
-              return
-            }
-            const emotion = detectEmotion(sentence)
-            const genderFactor = optsRef.current.gender === 'male' ? 0.92 : 1.0
-            const playbackRate = clamp(
-              SERVER_EMOTION_RATE[emotion] * genderFactor * jitter(sentence, 0.02),
-              0.5,
-              1.6
-            )
-            const source = ctx.createBufferSource()
-            source.buffer = buffer
-            source.playbackRate.value = playbackRate
-            sourceRef.current = source
-            source.onended = () => {
-              if (sourceRef.current === source) sourceRef.current = null
-              resolve()
-            }
-            source.connect(ctx.destination)
-            source.start()
-          })
-          .catch(reject)
+        if (ctx.state !== 'running') throw new Error('AudioContext не активен')
+      }
+      const buffer = await ctx.decodeAudioData(bytes)
+      if (generation !== generationRef.current) return
+
+      const emotion = detectEmotion(sentence)
+      const genderFactor = optsRef.current.gender === 'male' ? 0.92 : 1.0
+      const playbackRate = clamp(
+        SERVER_EMOTION_RATE[emotion] * genderFactor * jitter(sentence, 0.02),
+        0.5,
+        1.6
+      )
+      return new Promise<void>((resolve) => {
+        const source = ctx.createBufferSource()
+        source.buffer = buffer
+        source.playbackRate.value = playbackRate
+        sourceRef.current = source
+        let settled = false
+        const finishOnce = () => {
+          if (settled) return
+          settled = true
+          clearTimeout(watchdog)
+          if (sourceRef.current === source) sourceRef.current = null
+          resolve()
+        }
+        // Страховка: если onended не придёт (подвисший контекст/устройство) —
+        // развязываем насос по времени чуть больше длительности звука
+        const watchdog = setTimeout(() => {
+          try {
+            source.stop()
+          } catch {
+            /* ignore */
+          }
+          finishOnce()
+        }, (buffer.duration / Math.max(playbackRate, 0.5)) * 1000 + 4000)
+        source.onended = finishOnce
+        source.connect(ctx.destination)
+        source.start()
       })
     },
     [ensureCtx]
@@ -338,8 +355,10 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
 
       const cooldownActive = Date.now() < serverCooldownUntilRef.current
       if (!cooldownActive) {
+        // Таймаут fetch: подвисший запрос не должен блокировать очередь озвучки
+        const controller = new AbortController()
+        const fetchTimeout = setTimeout(() => controller.abort(), 10_000)
         try {
-          const controller = new AbortController()
           const res = await fetch('/api/tts', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -348,14 +367,16 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
           })
           if (!res.ok) throw new Error(`TTS ${res.status}`)
           const bytes = await res.arrayBuffer()
+          clearTimeout(fetchTimeout)
           if (generation !== generationRef.current) return
           await playServerAudio(bytes, clean, generation)
           serverFailCountRef.current = 0
           return
         } catch (error) {
+          clearTimeout(fetchTimeout)
           if (generation !== generationRef.current) return
-          if (error instanceof DOMException && error.name === 'AbortError') return
-          // Серверный голос не сработал — копим неудачи и включаем cooldown
+          // Серверный голос не сработал (в т.ч. таймаут) — копим неудачи
+          // и включаем cooldown, фразу произнесёт системный синтез
           serverFailCountRef.current++
           if (serverFailCountRef.current >= SERVER_FAIL_THRESHOLD) {
             serverCooldownUntilRef.current = Date.now() + SERVER_COOLDOWN_MS
