@@ -2,18 +2,12 @@
 
 import { ExternalLink, Music2, Pause, Play, SkipForward, X } from 'lucide-react'
 import type { YtPlayback } from '@/hooks/use-youtube-audio'
-
-export interface MusicTrackInfo {
-  videoId: string
-  title: string
-  author: string
-  url: string
-}
+import type { MusicTrack } from '@/lib/types'
 
 interface MusicPlayerProps {
-  track: MusicTrackInfo
+  track: MusicTrack
   playback: YtPlayback
-  /** YouTube-плеер не загрузился (нет доступа к youtube.com) */
+  /** Плеер не смог загрузиться/играть — предлагаем открыть источник */
   failed: boolean
   accent: string
   onToggle: () => void
@@ -21,20 +15,28 @@ interface MusicPlayerProps {
   onClose: () => void
 }
 
+const SOURCE_LABEL: Record<MusicTrack['source'], string> = {
+  mp3mn: 'Mp3.mn',
+  radio: 'радио',
+  youtube: 'YouTube',
+}
+
 /**
- * Панель фоновой музыки: играет аудио, видео скрыто. Кнопка на обложке —
+ * Панель фоновой музыки: играет аудио, видео не видно. Кнопка на обложке —
  * пауза/продолжить, «дальше» листает очередь, крестик выключает совсем.
  */
 export function MusicPlayer({ track, playback, failed, accent, onToggle, onNext, onClose }: MusicPlayerProps) {
   const playing = playback === 'playing'
 
   const status = failed
-    ? 'Плеер не загрузился — открой на YouTube'
+    ? 'не заиграло — открой источник'
     : playing
       ? 'играет на фоне'
       : playback === 'paused'
         ? 'на паузе'
         : 'загружаю…'
+
+  const artwork = track.artwork ?? (track.videoId ? `https://i.ytimg.com/vi/${track.videoId}/mqdefault.jpg` : null)
 
   return (
     <div
@@ -47,15 +49,19 @@ export function MusicPlayer({ track, playback, failed, accent, onToggle, onNext,
           onClick={onToggle}
           title={playing ? 'Пауза' : 'Продолжить'}
           aria-label={playing ? 'Пауза' : 'Продолжить'}
-          className="group relative size-11 shrink-0 overflow-hidden rounded-2xl border border-white/10 outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:scale-95"
+          className="group relative size-11 shrink-0 overflow-hidden rounded-2xl border border-white/10 bg-white/5 outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:scale-95"
         >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={`https://i.ytimg.com/vi/${track.videoId}/mqdefault.jpg`}
-            alt=""
-            className="size-full object-cover"
-            draggable={false}
-          />
+          {artwork ? (
+            <img
+              src={artwork}
+              alt=""
+              className="size-full object-cover"
+              draggable={false}
+              onError={(e) => {
+                e.currentTarget.style.display = 'none'
+              }}
+            />
+          ) : null}
           <span className="absolute inset-0 grid place-items-center bg-black/50 text-white transition-colors group-hover:bg-black/35">
             {playing ? <Pause className="size-5" /> : <Play className="size-5" />}
           </span>
@@ -71,7 +77,7 @@ export function MusicPlayer({ track, playback, failed, accent, onToggle, onNext,
               style={{ color: accent }}
             />
             <span className="truncate">
-              {status}
+              {SOURCE_LABEL[track.source]} · {status}
               {track.author && !failed ? ` · ${track.author}` : ''}
             </span>
           </p>
@@ -90,8 +96,8 @@ export function MusicPlayer({ track, playback, failed, accent, onToggle, onNext,
             href={track.url}
             target="_blank"
             rel="noopener noreferrer"
-            title="Открыть на YouTube"
-            aria-label="Открыть на YouTube"
+            title="Открыть источник в интернете"
+            aria-label="Открыть источник в интернете"
             className="grid size-8 place-items-center rounded-full text-white/50 transition-colors hover:bg-white/10 hover:text-white"
           >
             <ExternalLink className="size-4" />

@@ -36,3 +36,18 @@ export type AssistantState =
   | 'listening' // слушает микрофон
   | 'thinking' // обдумывает
   | 'speaking' // говорит
+
+/** Трек фоновой музыки, найденный в интернете (один из источников) */
+export interface MusicTrack {
+  source: 'mp3mn' | 'radio' | 'youtube'
+  title: string
+  author: string
+  /** Обложка (если источник её отдал) */
+  artwork?: string
+  /** Страница трека — «открыть в интернете» */
+  url: string
+  /** Прямой аудиопоток — для источников audius/radio */
+  audioSrc?: string
+  /** Только для youtube: id видео для скрытого плеера */
+  videoId?: string
+}

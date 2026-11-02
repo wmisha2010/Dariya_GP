@@ -92,10 +92,11 @@ export function useYouTubeAudio({ videoId, onEnded, onError }: UseYouTubeAudioOp
   const [failed, setFailed] = useState(false)
   const playerRef = useRef<YtPlayer | null>(null)
   const duckedRef = useRef(false)
-  const onEndedRef = useRef(onEnded)
-  onEndedRef.current = onEnded
-  const onErrorRef = useRef(onError)
-  onErrorRef.current = onError
+  const handlersRef = useRef({ onEnded, onError })
+  // Держим актуальные колбэки вне рендера — события плеера всегда зовут свежие
+  useEffect(() => {
+    handlersRef.current = { onEnded, onError }
+  })
 
   /** Стабильный id обёртки: контейнер обязан жить в DOM, пока играет музыка */
   const [containerId] = useState(() => `yt-audio-${Math.random().toString(36).slice(2, 9)}`)
@@ -104,13 +105,20 @@ export function useYouTubeAudio({ videoId, onEnded, onError }: UseYouTubeAudioOp
     if (!videoId) {
       playerRef.current?.destroy()
       playerRef.current = null
-      setPlayback('idle')
-      setFailed(false)
+      // setState отложен в микрозадачу — не в теле эффекта (react-hooks)
+      queueMicrotask(() => {
+        setPlayback('idle')
+        setFailed(false)
+      })
       return
     }
     let cancelled = false
-    setFailed(false)
-    setPlayback('loading')
+    queueMicrotask(() => {
+      if (!cancelled) {
+        setFailed(false)
+        setPlayback('loading')
+      }
+    })
     loadYouTubeApi()
       .then((YT) => {
         if (cancelled) return
@@ -137,10 +145,10 @@ export function useYouTubeAudio({ videoId, onEnded, onError }: UseYouTubeAudioOp
               else if (event.data === 2) setPlayback('paused')
               else if (event.data === 0) {
                 setPlayback('idle')
-                onEndedRef.current?.()
+                handlersRef.current.onEnded?.()
               }
             },
-            onError: () => onErrorRef.current?.(),
+            onError: () => handlersRef.current.onError?.(),
           },
         })
       })

@@ -4,8 +4,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/hooks/use-toast'
+import { useAudioPlayer } from '@/hooks/use-audio-player'
 import { useSpeechRecognition } from '@/hooks/use-speech-recognition'
 import { useTtsQueue } from '@/hooks/use-tts-queue'
+import { useYouTubeAudio } from '@/hooks/use-youtube-audio'
 import { ChatPanel } from '@/components/daria/chat-panel'
 import { MemoryDialog } from '@/components/daria/memory-dialog'
 import { MusicPlayer } from '@/components/daria/music-player'
@@ -13,7 +15,7 @@ import { SettingsDialog } from '@/components/daria/settings-dialog'
 import { VoiceOrb } from '@/components/daria/voice-orb'
 import { WaveBars } from '@/components/daria/wave-bars'
 import { cn } from '@/lib/utils'
-import type { AssistantState, Character, ChatMessage } from '@/lib/types'
+import type { AssistantState, Character, ChatMessage, MusicTrack } from '@/lib/types'
 import {
   AudioLines,
   Brain,
@@ -40,13 +42,57 @@ const TTS_VOICE_STORAGE_KEY = 'daria-tts-voice'
 /** Пауза после конца озвучки, прежде чем снова включать микрофон (затухание эха) */
 const ECHO_GRACE_MS = 700
 
-/** Голосовое управление музыкой: «включи/поставь/запусти …» */
-const MUSIC_TRIGGER_RE = /^\s*(включи(?:те)?|поставь(?:те)?|запусти(?:те)?|сыграй(?:те)?|играй(?:те)?)\s+/i
-/** «выключи/стоп …» — остановить плеер */
-const MUSIC_STOP_RE = /^\s*(выключи(?:те)?|останови(?:те)?|стоп|хватит)\s*/i
+/** Голосовое управление музыкой: глаголы команды в любом месте фразы
+ *  («найди в интернете музыку…», «сама включи…», «врубай рок») */
+const MUSIC_VERB_RE =
+  /(включи(?:те)?|включай(?:те)?|врубай(?:те)?|вруби(?:те)?|поставь(?:те)?|запусти(?:те)?|сыграй(?:те)?|играй(?:те)?|найди(?:те)?|поищи(?:те)?|открой(?:те)?|послушаем)/i
+/** «выключи/останови/хватит …» — остановить плеер (в любом месте фразы) */
+const MUSIC_STOP_RE = /(выключи(?:те)?|выруб[а-яё]*|останови(?:те)?|заглуши[а-яё]*|хватит)/i
+/** Отрицание: «не включай музыку» — это не команда играть */
+const MUSIC_NEGATION_RE = /не\s+(?:включай|играй|запускай|ставь|трогай)/i
+/** «пауза…» — заморозить фоновую музыку */
+const MUSIC_PAUSE_RE = /пауз[а-яё]*/i
+/** «продолжай (музыку)» — возобновить после паузы */
+const MUSIC_RESUME_RE =
+  /^\s*(?:продолж[а-яё]*|возобнов[а-яё]*|включи обратно|играй дальше)\s*(?:музык[а-яё]*|песн[а-яё]*)?\s*$/i
+/** «дальше / следующий трек» — перелистать очередь */
+const MUSIC_NEXT_RE =
+  /^\s*(?:дальше|следующ[а-яё]*(?:\s+(?:песн|трек|музык)[а-яё]*)?|друг[а-яё]*\s+(?:песн|трек)[а-яё]*|смен[а-яё]*\s+(?:песн|трек)[а-яё]*|пропусти[а-яё]*|next)\s*$/i
+
+/** Мусор в команде: «включи музыку из интернета» — ищем без «из интернета» */
+const MUSIC_FILLER_RE =
+  /\s*(?:из\s+(?:интернета?|сети|веба)|в\s+интернете?|в\s+онлайне?|онлайн|пожалуйста|что-?нибудь|что\s+нибудь|любую|любим[а-яё]*|какую-?нибудь|сама(?![а-яё])|сами(?![а-яё])|мне)\s*/gi
+/** Общие слова в начале запроса: «музыку Кино» → «Кино», «лирику Сектор Газа» → «Сектор Газа» */
+const MUSIC_NOUN_HEAD_RE =
+  /^\s*(?:музыку|музыка|музыки|песню|песня|песенку|песни|трек|трека|треки|композицию|композиция|клип|плейлист|ремикс|альбом|сборник|хит|мелодию|мелодия|лирику|лирика|лирики|лирик[а-яё]*)\s+/i
+/** Запрос состоит только из общих слов — конкретики нет, играем популярное */
+const MUSIC_NOUN_ONLY_RE =
+  /^\s*(?:музык[а-яё]*|песн[а-яё]*|трек[а-яё]*|клип[а-яё]*|плейлист[а-яё]*|ремикс[а-яё]*|альбом[а-яё]*|сборник[а-яё]*|хит[а-яё]*|мелоди[а-яё]*|лирик[а-яё]*|чего-?нибудь|что-?нибудь)\s*$/i
+
+/** Что играть на «просто включи музыку» — без конкретного исполнителя */
+const DEFAULT_MUSIC_QUERIES = [
+  'популярная музыка',
+  'новинки музыки',
+  'лучшие хиты',
+  'музыка для души',
+  'красивая музыка',
+]
+
+/** «найди в интернете музыку Сектор Газа, пожалуйста» → «сектор газа», «включи лирику» → '' (популярное) */
+function extractMusicQuery(raw: string): string {
+  let q = raw.replace(MUSIC_VERB_RE, ' ').replace(MUSIC_FILLER_RE, ' ')
+  let prev = ''
+  while (prev !== q) {
+    prev = q
+    q = q.replace(MUSIC_NOUN_HEAD_RE, '')
+  }
+  q = q.replace(/^[\s,.:;!?—-]+|[\s,.:;!?—-]+$/g, '').trim()
+  if (!q || MUSIC_NOUN_ONLY_RE.test(q)) return ''
+  return q.slice(0, 120)
+}
 /** В команде должна быть музыкальная тема — чтобы «включи свет» не запускал плеер */
 const MUSIC_TOPIC_RE =
-  /(песн|музык|трек|плейлист|композици|ремикс|альбом|рэп|\bрок|\bпоп|джаз|блюз|классическ|инструментальн|фортепиан|гитар|металл|электро|танцевальн|спокойн|грустн|весел|весёл|романтич|колыбельн|хит|клип|мелод|исполнител|расслаб|концентрац|фонов|звук\w*\s+природ|дожд)/i
+  /(песн|музык|трек|плейлист|композици|ремикс|альбом|рэп|лирик|фонк|шансон|кантри|панк|(?:^|\s)(?:рок|поп|рэп)(?![а-яё])|джаз|блюз|классическ|инструментальн|фортепиан|гитар|металл|электро(?![а-яё])|танцевальн|спокойн|грустн|весел|весёл|романтич|колыбельн|хит|клип|мелод|исполнител|расслаб|концентрац|фонов|звук[а-яё]*\s+природ|дожд)/i
 
 export default function Home() {
   const { toast } = useToast()
@@ -64,8 +110,8 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   /** Раскрытый тулбар «Дополнительно» над строкой ввода */
   const [toolsOpen, setToolsOpen] = useState(false)
-  /** Сейчас играет трек (YouTube-плеер смонтирован) */
-  const [music, setMusic] = useState<{ videoId: string; title: string; url: string } | null>(null)
+  /** Сессия фоновой музыки: очередь треков из интернета + индекс текущего */
+  const [music, setMusic] = useState<{ tracks: MusicTrack[]; index: number } | null>(null)
 
   // Ввод
   const [inputValue, setInputValue] = useState('')
@@ -128,8 +174,50 @@ export default function Home() {
 
   const tts = useTtsQueue({ voiceId: ttsVoice, onPlaybackBlocked: handlePlaybackBlocked })
 
+  // ─── Фоновая музыка: очередь из интернета + два движка ─────────────────
+  // Аудио-движок (Audius/радио — прямые потоки) и YouTube-движок (скрытый
+  // iframe, запасной вариант): включается тот, чей трек сейчас в очереди.
+  const musicErrorsRef = useRef(0)
+  const handleMusicEnded = useCallback(() => {
+    setMusic((prev) => (prev ? { ...prev, index: (prev.index + 1) % prev.tracks.length } : prev))
+  }, [])
+  const handleMusicError = useCallback(() => {
+    // Трек не заиграл — пробуем следующий; если весь список битый — закрываем
+    musicErrorsRef.current += 1
+    setMusic((prev) => {
+      if (!prev) return null
+      if (musicErrorsRef.current >= prev.tracks.length) return null
+      return { ...prev, index: (prev.index + 1) % prev.tracks.length }
+    })
+  }, [])
+
+  const currentTrack = music ? (music.tracks[music.index] ?? null) : null
+  const currentIsYt = currentTrack?.source === 'youtube'
+
+  const yt = useYouTubeAudio({
+    videoId: currentIsYt ? currentTrack?.videoId ?? null : null,
+    onEnded: handleMusicEnded,
+    onError: handleMusicError,
+  })
+  const audioPlayer = useAudioPlayer({
+    src: currentTrack && !currentIsYt ? currentTrack.audioSrc ?? null : null,
+    onEnded: handleMusicEnded,
+    onError: handleMusicError,
+  })
+
+  const musicPlayback = currentIsYt ? yt.playback : audioPlayer.playback
+  const musicToggle = currentIsYt ? yt.toggle : audioPlayer.toggle
+  /** Музыка сейчас реально слышна (сессия активна и не на паузе) */
+  const musicAudible = music !== null && musicPlayback !== 'paused'
+
+  // Пока Дария говорит — музыка тише; договорила — громкость вернулась
+  useEffect(() => {
+    yt.duck(tts.speaking)
+    audioPlayer.duck(tts.speaking)
+  }, [tts.speaking, yt.duck, audioPlayer.duck])
+
   ttsSpeakingRef.current = tts.speaking
-  musicPlayingRef.current = music !== null
+  musicPlayingRef.current = musicAudible
   /** Всё услышанное во время озвучки/музыки и сразу после — эхо, а не речь пользователя */
   const isEcho = () =>
     ttsSpeakingRef.current || musicPlayingRef.current || Date.now() < echoMuteUntilRef.current
@@ -173,25 +261,57 @@ export default function Home() {
           return
         }
 
-        // Голосовое управление музыкой: «включи песню…» — ищем и играем
-        if (MUSIC_TRIGGER_RE.test(text) && MUSIC_TOPIC_RE.test(text)) {
-          const query =
-            text
-              .replace(MUSIC_TRIGGER_RE, '')
-              .replace(/\s*пожалуйста\s*/gi, ' ')
-              .trim()
-              .slice(0, 120) || 'музыка'
-          const res = await fetch('/api/music', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query }),
-          })
-          if (!res.ok) throw new Error('nothing found')
-          const json = (await res.json()) as { track?: { videoId: string; title: string; url: string } }
-          if (!json.track) throw new Error('nothing found')
-          tts.stop()
-          setMusic({ videoId: json.track.videoId, title: json.track.title, url: json.track.url })
-          assistantLocalReply(`Включаю «${json.track.title}» 🎵\n${json.track.url}`)
+        // «Пауза» — заморозить фон, «продолжай» — возобновить после паузы
+        if (
+          music &&
+          (MUSIC_PAUSE_RE.test(text) ||
+            (musicPlayback === 'paused' && MUSIC_RESUME_RE.test(text)))
+        ) {
+          const wasPlaying = musicPlayback === 'playing'
+          musicToggle()
+          assistantLocalReply(wasPlaying ? 'Поставила музыку на паузу ⏸' : 'Продолжаю музыку ▶')
+          return
+        }
+
+        // «Дальше / следующий трек» — листаем очередь
+        if (music && MUSIC_NEXT_RE.test(text)) {
+          const nextIndex = (music.index + 1) % music.tracks.length
+          setMusic({ ...music, index: nextIndex })
+          assistantLocalReply(`Ставлю следующую: «${music.tracks[nextIndex].title}» 🎵`)
+          return
+        }
+
+        // «Включи музыку / найди песню… из интернета» — ищем и играем фоном
+        if (
+          MUSIC_VERB_RE.test(text) &&
+          MUSIC_TOPIC_RE.test(text) &&
+          !MUSIC_NEGATION_RE.test(text)
+        ) {
+          const query = extractMusicQuery(text)
+          const chosen =
+            query || DEFAULT_MUSIC_QUERIES[Math.floor(Math.random() * DEFAULT_MUSIC_QUERIES.length)]
+          try {
+            const res = await fetch('/api/music', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ query: chosen, mode: query ? 'specific' : 'generic' }),
+            })
+            if (!res.ok) throw new Error('nothing found')
+            const json = (await res.json()) as { tracks?: MusicTrack[] }
+            const tracks = (json.tracks ?? []).filter((t) => t.audioSrc || t.videoId)
+            if (!tracks.length) throw new Error('nothing found')
+            tts.stop()
+            musicErrorsRef.current = 0
+            setMusic({ tracks, index: 0 })
+            const first = tracks[0]
+            assistantLocalReply(
+              `Включаю «${first.title}»${first.author ? ` — ${first.author}` : ''} 🎵`
+            )
+          } catch {
+            assistantLocalReply(
+              'Не нашла музыку в интернете — попробуй назвать исполнителя или трек 🙈'
+            )
+          }
           return
         }
 
@@ -266,7 +386,7 @@ export default function Home() {
         setBusy(false)
       }
     },
-    [activeCharacter, assistantLocalReply, toast, tts]
+    [activeCharacter, assistantLocalReply, music, musicPlayback, musicToggle, toast, tts]
   )
 
   // ─── Микрофон ───────────────────────────────────────────────────────────
@@ -334,7 +454,7 @@ export default function Home() {
 
   // Пока звучит голос ассистента или музыка — приглушаем микрофон (он не слышит
   // сам себя), после тишины возвращаем с паузой на затухание звука
-  const audible = tts.speaking || music !== null
+  const audible = tts.speaking || musicAudible
   useEffect(() => {
     if (audible && !wasSpeakingRef.current) {
       wasSpeakingRef.current = true
@@ -364,7 +484,7 @@ export default function Home() {
   // ─── Состояние ассистента для орбиса ────────────────────────────────────
   const assistantState: AssistantState = micListening
     ? 'listening'
-    : tts.speaking || music !== null
+    : tts.speaking || musicAudible
       ? 'speaking'
       : busy
         ? 'thinking'
@@ -442,7 +562,9 @@ export default function Home() {
       ? `Слушаю: «${interim}»`
       : 'Слушаю…'
     : music
-      ? '♪ Музыка играет'
+      ? musicPlayback === 'paused'
+        ? '♪ Музыка на паузе'
+        : '♪ Музыка на фоне'
       : tts.speaking
         ? 'Говорю…'
         : busy
@@ -511,17 +633,32 @@ export default function Home() {
 
         {/* Композер: плеер, тулбар «Дополнительно» и строка ввода */}
         <div className="shrink-0 pb-2 pt-2">
-          {/* Плеер: музыка играет даже во время переписки */}
-          {music && (
+          {/* Плеер: музыка играет на фоне даже во время переписки */}
+          {music && currentTrack && (
             <div className="mb-2.5">
               <MusicPlayer
-                videoId={music.videoId}
-                title={music.title}
-                url={music.url}
+                track={currentTrack}
+                playback={musicPlayback}
+                failed={currentIsYt ? yt.failed : false}
                 accent={accent}
+                onToggle={musicToggle}
+                onNext={() =>
+                  setMusic((prev) =>
+                    prev ? { ...prev, index: (prev.index + 1) % prev.tracks.length } : prev
+                  )
+                }
                 onClose={() => setMusic(null)}
               />
             </div>
+          )}
+
+          {/* Скрытый контейнер YouTube-плеера: слышим музыку, видео не видно */}
+          {music && currentIsYt && (
+            <div
+              id={yt.containerId}
+              aria-hidden="true"
+              className="pointer-events-none fixed left-0 top-0 z-0 size-1.5 overflow-hidden opacity-[0.01]"
+            />
           )}
 
           {/* Звук заблокирован autoplay-политикой — ждём первого касания */}
