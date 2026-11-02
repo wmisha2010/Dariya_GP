@@ -1,6 +1,6 @@
 'use client'
 
-import { AudioLines, Brain, Globe, Mic, Sparkles, Trash2, Volume2, VolumeX } from 'lucide-react'
+import { AudioLines, Brain, Globe, Sparkles, Trash2, Volume2, VolumeX } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -17,9 +17,6 @@ interface SettingsDialogProps {
   /** Выбранный голос (id из белого списка /api/tts) */
   voiceId: string
   onVoiceChange: (id: string) => void
-  /** Имя активации (id из WAKE_OPTIONS ниже) */
-  wakeWordId: string
-  onWakeChange: (id: string) => void
   voiceOn: boolean
   onVoiceToggle: () => void
   searchOn: boolean
@@ -40,30 +37,6 @@ const VOICE_OPTIONS = [
     name: 'Ирина',
     engine: 'Piper · локальный синтез',
     description: 'Работает без интернета, без лимитов и ключей',
-  },
-] as const
-
-/** Имена активации: id совпадают с WAKE_WORDS в page.tsx */
-const WAKE_OPTIONS = [
-  {
-    id: 'dasha',
-    name: 'Даша',
-    hint: 'Коротко и распознаётся надёжнее всего — рекомендую',
-  },
-  {
-    id: 'daria',
-    name: 'Дария',
-    hint: 'Полное имя — браузер иногда слышит его как «далее»',
-  },
-  {
-    id: 'dusya',
-    name: 'Дуся',
-    hint: 'Домашнее имя, в обычной речи почти не звучит',
-  },
-  {
-    id: 'alisa',
-    name: 'Алиса',
-    hint: 'Как у большой Алисы — узнаётся мгновенно',
   },
 ] as const
 
@@ -122,8 +95,6 @@ export function SettingsDialog({
   onOpenChange,
   voiceId,
   onVoiceChange,
-  wakeWordId,
-  onWakeChange,
   voiceOn,
   onVoiceToggle,
   searchOn,
@@ -188,48 +159,6 @@ export function SettingsDialog({
           </div>
         </section>
 
-        {/* Активация голосом: имя, на которое просыпается ассистент */}
-        <section className="mt-4">
-          <h3 className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-white/35">
-            <Mic className="size-3.5" />
-            Активация голосом
-          </h3>
-          <div className="grid grid-cols-2 gap-2">
-            {WAKE_OPTIONS.map((w) => {
-              const active = wakeWordId === w.id
-              return (
-                <button
-                  key={w.id}
-                  onClick={() => onWakeChange(w.id)}
-                  aria-pressed={active}
-                  title={w.hint}
-                  className={cn(
-                    'rounded-2xl border px-3 py-2.5 text-left transition-all',
-                    active
-                      ? 'border-teal-400/50 bg-teal-400/10'
-                      : 'border-white/8 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.06]'
-                  )}
-                >
-                  <span className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-white/90">{w.name}</span>
-                    {active && (
-                      <span className="rounded-full bg-teal-400/20 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-teal-300">
-                        выбрано
-                      </span>
-                    )}
-                  </span>
-                  <span className="mt-0.5 block text-[10px] leading-snug text-white/40">
-                    {w.hint}
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-          <p className="mt-1.5 text-[10px] leading-snug text-white/30">
-            Скажи имя — Дария проснётся и выполнит команду. Работает и когда играет музыка, и когда она отвечает
-          </p>
-        </section>
-
         {/* Переключатели */}
         <section className="mt-4 flex flex-col gap-2">
           <SwitchRow
@@ -270,7 +199,7 @@ export function SettingsDialog({
 
         {/* Версия интерфейса: маркер свежего билда — если её видно, кэш побеждён */}
         <p className="mt-4 text-center text-[10px] tracking-wide text-white/25">
-          Дария · интерфейс v2.4 · сборка 14:10 · 2 ноября 2026
+          Дария · интерфейс v2.5 · сборка 14:33 · 2 ноября 2026
         </p>
       </DialogContent>
     </Dialog>
