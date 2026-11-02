@@ -32,7 +32,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.1 (brain v2.5)'
+const VERSION = 'v0.2 (brain v2.5)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -165,6 +165,11 @@ async function handleStatus(env: Env): Promise<Response> {
     '<h1>Дария-бот жива 😏</h1>',
     `<p>Версия: ${VERSION}</p>`,
     token ? '<p>Токен: задан ✅</p>' : '<p>Токен: НЕ задан — добавьте секрет TELEGRAM_BOT_TOKEN</p>',
+    env.OPENROUTER_API_KEY
+      ? `<p>Мозг: подключён ✅ <small>(OpenRouter: ${env.OPENROUTER_MODEL || 'по умолчанию'})</small></p>`
+      : env.GEMINI_API_KEY
+        ? '<p>Мозг: подключён ✅ <small>(Gemini)</small></p>'
+        : '<p>Мозг: НЕ подключён 😴 — добавьте секрет OPENROUTER_API_KEY</p>',
     webhookInfo,
     '<p>Setup: <code>/setup?bot_token=ТОКЕН</code></p>',
   ].join(''))
