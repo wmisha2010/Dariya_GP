@@ -218,12 +218,18 @@ export default function Home() {
   const currentVoiceLabel =
     TTS_VOICES.find((v) => v.id === ttsVoice)?.name ?? TTS_VOICES[0].name
 
-  // Восстанавливаем громкости с прошлого визита
+  // Восстанавливаем громкости с прошлого визита.
+  // ВАЖНО: Number(null) === 0 — пустой localStorage «делал» громкость нулём,
+  // и музыка играла беззвучно. Считаем только реально сохранённые значения.
   useEffect(() => {
-    const m = Number(window.localStorage.getItem(MUSIC_VOL_KEY))
-    const t = Number(window.localStorage.getItem(TTS_VOL_KEY))
-    if (Number.isFinite(m) && m >= 0 && m <= 100) setMusicVolume(Math.round(m))
-    if (Number.isFinite(t) && t >= 0 && t <= 100) setTtsVolume(Math.round(t))
+    const restore = (key: string, apply: (v: number) => void) => {
+      const raw = window.localStorage.getItem(key)
+      if (raw === null) return
+      const n = Number(raw)
+      if (Number.isFinite(n) && n >= 0 && n <= 100) apply(Math.round(n))
+    }
+    restore(MUSIC_VOL_KEY, setMusicVolume)
+    restore(TTS_VOL_KEY, setTtsVolume)
   }, [])
 
   /** Изменить громкость музыки с запоминанием */

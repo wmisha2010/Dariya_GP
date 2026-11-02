@@ -110,43 +110,74 @@ interface RadioStation {
   lastcheckok?: number
 }
 
+/** Зеркала radio-browser.info: сервис часто рвёт соединения — идём по списку */
+const RADIO_MIRRORS = [
+  'de1.api.radio-browser.info',
+  'all.api.radio-browser.info',
+  'nl1.api.radio-browser.info',
+  'fi1.api.radio-browser.info',
+]
+
+/** Поиск по каталогу с ротацией зеркал: первое же живое возвращает список */
+async function fetchRadioStations(params: URLSearchParams): Promise<RadioStation[]> {
+  for (const host of RADIO_MIRRORS) {
+    try {
+      const res = await fetch(`https://${host}/json/stations/search?${params}`, {
+        signal: AbortSignal.timeout(6000),
+        headers: { 'User-Agent': 'Daria-Assistant/1.0' },
+      })
+      if (!res.ok) continue
+      const list = (await res.json()) as RadioStation[]
+      if (Array.isArray(list)) return list
+    } catch {
+      // зеркало недоступно — пробуем следующее
+    }
+  }
+  return []
+}
+
 async function searchRadio(query: string): Promise<MusicTrack[]> {
   try {
-    const params = new URLSearchParams({
-      name: query.slice(0, 60),
-      limit: '8',
-      hidebroken: 'true',
-      order: 'clickcount',
-      reverse: 'true',
-    })
-    const res = await fetch(`https://de1.api.radio-browser.info/json/stations/search?${params}`, {
-      signal: AbortSignal.timeout(8000),
-      headers: { 'User-Agent': 'Daria-Assistant/1.0' },
-    })
-    if (!res.ok) return []
-    const list = (await res.json()) as RadioStation[]
-    if (!Array.isArray(list)) return []
-    // http-потоки тоже берём: стрим-прокси отдаёт их странице по https
-    return list
-      .filter((s) => {
-        const url = s.url_resolved ?? ''
-        const codec = (s.codec ?? '').toLowerCase()
-        return (
-          url.startsWith('http') &&
-          !url.endsWith('.pls') &&
-          s.lastcheckok !== 0 &&
-          (codec === '' || codec.includes('mp3') || codec.includes('aac'))
-        )
-      })
-      .slice(0, 4)
-      .map((s) => ({
-        source: 'radio' as const,
-        title: (s.name ?? 'Радио').trim().slice(0, 120) || 'Радио',
-        author: 'интернет-радио',
-        artwork: s.favicon?.startsWith('https://') ? s.favicon : undefined,
-        url: s.homepage ?? s.url_resolved ?? '',
-        audioSrc: s.url_resolved ? proxied(s.url_resolved) : undefined,
-      }))
+    const base = { limit: '8', hidebroken: 'true', order: 'clickcount', reverse: 'true' }
+    // 1) по названию станции; 2) по тегу-жанру (первое слово); 3) просто «радио».
+    // «западные хиты 80-х» не совпадёт ни с одним названием станции — тогда
+    // отступаем к жанру, а после — к живому общему поиску, чтобы станции
+    // находились почти всегда.
+    const firstWord = query.trim().split(/\s+/)[0] ?? ''
+    const attempts: Array<Record<string, string>> = [
+      { name: query.slice(0, 60) },
+      ...(firstWord && firstWord.toLowerCase() !== query.trim().toLowerCase()
+        ? [{ bytag: firstWord.slice(0, 30) }]
+        : []),
+      { name: 'радио' },
+    ]
+    for (const attempt of attempts) {
+      const list = await fetchRadioStations(new URLSearchParams({ ...attempt, ...base }))
+      if (!list.length) continue
+      // http-потоки тоже берём: стрим-прокси отдаёт их странице по https
+      const tracks = list
+        .filter((s) => {
+          const url = s.url_resolved ?? ''
+          const codec = (s.codec ?? '').toLowerCase()
+          return (
+            url.startsWith('http') &&
+            !url.endsWith('.pls') &&
+            s.lastcheckok !== 0 &&
+            (codec === '' || codec.includes('mp3') || codec.includes('aac'))
+          )
+        })
+        .slice(0, 4)
+        .map((s) => ({
+          source: 'radio' as const,
+          title: (s.name ?? 'Радио').trim().slice(0, 120) || 'Радио',
+          author: 'интернет-радио',
+          artwork: s.favicon?.startsWith('https://') ? s.favicon : undefined,
+          url: s.homepage ?? s.url_resolved ?? '',
+          audioSrc: s.url_resolved ? proxied(s.url_resolved) : undefined,
+        }))
+      if (tracks.length) return tracks
+    }
+    return []
   } catch {
     return []
   }
@@ -289,12 +320,12 @@ export async function POST(req: NextRequest) {
         if (seen.has(key)) continue
         seen.add(key)
         tracks.push(t)
-        if (tracks.length >= 10) return
+        if (tracks.length >= 12) return
       }
     }
     pushAll(mp3mn.slice(0, 4))
     pushAll(youtube.slice(0, 4))
-    pushAll(radio.slice(0, 3))
+    pushAll(radio.slice(0, 4))
     if (tracks.length < 3) pushAll([...mp3mn, ...youtube, ...radio])
 
     if (searchCache.size >= CACHE_MAX) {

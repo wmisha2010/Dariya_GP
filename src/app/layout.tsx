@@ -49,6 +49,26 @@ export const viewport: Viewport = {
   initialScale: 1,
 };
 
+/**
+ * Аварийный выключатель сервис-воркера, инлайн в <body> первым узлом.
+ * Выполняется из СВЕЖЕГО HTML до старых бандлов: если в браузере сидит
+ * старый воркер (закэшировал дев-чанки — «приложение откатилось»), снимаем
+ * его и чистим кэши, затем один reload. В проде — неактивен.
+ */
+const SW_KILL_SWITCH = `(function(){try{
+if(!('serviceWorker' in navigator))return;
+if("${process.env.NODE_ENV}"==="production")return;
+var had=!!navigator.serviceWorker.controller;
+navigator.serviceWorker.getRegistrations().then(function(regs){
+if(!regs||!regs.length)return;
+Promise.all(regs.map(function(r){return r.unregister();}))
+.then(function(){return caches.keys().then(function(ks){return Promise.all(ks.map(function(k){return caches.delete(k);}));});})
+.then(function(){
+try{if(had&&!sessionStorage.getItem('daria-sw-cleaned')){sessionStorage.setItem('daria-sw-cleaned','1');location.reload();}}catch(e){}
+}).catch(function(){});
+}).catch(function(){});
+}catch(e){}})();`;
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -59,6 +79,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
+        <script dangerouslySetInnerHTML={{ __html: SW_KILL_SWITCH }} />
         {children}
         <Toaster />
         <PwaRegister />
