@@ -6,29 +6,51 @@ import type { YtPlayback } from '@/hooks/use-youtube-audio'
 export interface UseAudioPlayerOptions {
   /** Прямой URL аудиопотока; null — плеер выключен */
   src: string | null
+  /** Пользовательская громкость 0-100 (голосовая команда «громкость 40») */
+  volume?: number
   /** Трек закончился — включаем следующий */
   onEnded?: () => void
   /** Поток не играет (умер, формат не тот) — пропускаем */
   onError?: () => void
 }
 
-/** Доля громкости, пока говорит Дария */
-const DUCK_VOLUME = 0.2
+/** Во сколько раз тише музыка, пока говорит Дария */
+const DUCK_FACTOR = 0.2
+/** Если поток не заиграл за это время — считаем его битым и листаем дальше */
+const START_WATCHDOG_MS = 12_000
+
+const clampVolume = (v: number) => Math.min(100, Math.max(0, Math.round(v)))
 
 /**
  * Фоновый аудиоплеер на HTMLAudioElement: играет прямые потоки из интернета
- * (Audius, интернет-радио) без видео. Умеет пауза/продолжить и приглушение
- * громкости на время голоса ассистента.
+ * (mp3.mn, интернет-радио — через стрим-прокси) без видео. Умеет пауза/
+ * продолжить, громкость и приглушение на время голоса ассистента.
+ * Битый поток не блокирует очередь: ошибка play() или тишина на старте
+ * приводят к onError — плеер переходит к следующему треку.
  */
-export function useAudioPlayer({ src, onEnded, onError }: UseAudioPlayerOptions) {
+export function useAudioPlayer({ src, volume = 100, onEnded, onError }: UseAudioPlayerOptions) {
   const [playback, setPlayback] = useState<YtPlayback>('idle')
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const duckedRef = useRef(false)
+  const volumeRef = useRef(clampVolume(volume))
   const handlersRef = useRef({ onEnded, onError })
   // Держим актуальные колбэки вне рендера — события элемента всегда зовут свежие
   useEffect(() => {
     handlersRef.current = { onEnded, onError }
   })
+
+  /** Эффективная громкость = пользовательская × коэффициент приглушения */
+  const applyVolume = useCallback(() => {
+    const audio = audioRef.current
+    if (!audio) return
+    const factor = duckedRef.current ? DUCK_FACTOR : 1
+    audio.volume = Math.min(1, (volumeRef.current / 100) * factor)
+  }, [])
+
+  useEffect(() => {
+    volumeRef.current = clampVolume(volume)
+    applyVolume()
+  }, [volume, applyVolume])
 
   useEffect(() => {
     if (!src) {
@@ -38,40 +60,52 @@ export function useAudioPlayer({ src, onEnded, onError }: UseAudioPlayerOptions)
       queueMicrotask(() => setPlayback('idle'))
       return
     }
+    let dead = false
     queueMicrotask(() => setPlayback('loading'))
     const audio = new Audio()
     audio.src = src
     audio.preload = 'auto'
-    audio.volume = duckedRef.current ? DUCK_VOLUME : 1
     audioRef.current = audio
+    applyVolume()
 
     const onPlaying = () => setPlayback('playing')
     const onPaused = () => setPlayback('paused')
-    const handleEnded = () => {
-      setPlayback('idle')
-      handlersRef.current.onEnded?.()
-    }
-    const handleError = () => {
+    const fail = () => {
+      if (dead) return
+      dead = true
       setPlayback('idle')
       handlersRef.current.onError?.()
+    }
+    const handleEnded = () => {
+      if (dead) return
+      setPlayback('idle')
+      handlersRef.current.onEnded?.()
     }
     audio.addEventListener('playing', onPlaying)
     audio.addEventListener('pause', onPaused)
     audio.addEventListener('ended', handleEnded)
-    audio.addEventListener('error', handleError)
-    // Пользователь уже взаимодействовал со страницей — автозапуск звука разрешён
-    audio.play().catch(() => setPlayback('idle'))
+    audio.addEventListener('error', fail)
+
+    // Пользователь уже взаимодействовал со страницей — автозапуск звука разрешён.
+    // Отказ play() (битый поток, NotAllowedError) — не молчим, а листаем дальше
+    audio.play().catch(fail)
+
+    // Страховка от «вечного»: поток подключился, но тишина (станция умерла,
+    // прокси висит) — через таймаут считаем трек битым
+    const watchdog = setTimeout(fail, START_WATCHDOG_MS)
 
     return () => {
+      dead = true
+      clearTimeout(watchdog)
       audio.removeEventListener('playing', onPlaying)
       audio.removeEventListener('pause', onPaused)
       audio.removeEventListener('ended', handleEnded)
-      audio.removeEventListener('error', handleError)
+      audio.removeEventListener('error', fail)
       audio.pause()
       audio.src = ''
       audioRef.current = null
     }
-  }, [src])
+  }, [src, applyVolume])
 
   /** Пауза / продолжить (кнопка на панели и голосовая команда «пауза») */
   const toggle = useCallback(() => {
@@ -85,10 +119,13 @@ export function useAudioPlayer({ src, onEnded, onError }: UseAudioPlayerOptions)
   }, [])
 
   /** Приглушить музыку на время голоса ассистента */
-  const duck = useCallback((on: boolean) => {
-    duckedRef.current = on
-    if (audioRef.current) audioRef.current.volume = on ? DUCK_VOLUME : 1
-  }, [])
+  const duck = useCallback(
+    (on: boolean) => {
+      duckedRef.current = on
+      applyVolume()
+    },
+    [applyVolume]
+  )
 
   return { playback, toggle, duck }
 }

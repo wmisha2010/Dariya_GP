@@ -21,12 +21,27 @@ export function PwaRegister() {
   const [visible, setVisible] = useState(false)
 
   useEffect(() => {
-    // Регистрация сервис-воркера (без неё браузер не предложит установку)
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(() => {
-        /* установка не критична для работы */
-      })
+    if (!('serviceWorker' in navigator)) return
+
+    // В разработке сервис-воркер вреден: дев-чанки не хэшируются контентом,
+    // и закэшированный код «приклеивается» — правки не доходят до браузера.
+    // Снимаем воркер и чистим кэши; регистрация — только в проде
+    if (process.env.NODE_ENV !== 'production') {
+      void navigator.serviceWorker
+        .getRegistrations()
+        .then((regs) => Promise.all(regs.map((reg) => reg.unregister())))
+        .catch(() => {})
+      void caches
+        .keys()
+        .then((keys) => Promise.all(keys.map((key) => caches.delete(key))))
+        .catch(() => {})
+      return
     }
+
+    // Регистрация сервис-воркера (без неё браузер не предложит установку)
+    navigator.serviceWorker.register('/sw.js').catch(() => {
+      /* установка не критична для работы */
+    })
 
     // Уже установлено как приложение — кнопку не показываем
     const standalone =

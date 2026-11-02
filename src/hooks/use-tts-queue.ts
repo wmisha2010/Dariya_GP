@@ -11,6 +11,8 @@ interface UseTtsQueueOptions {
   /** Выбранный пользователем голос (id из белого списка сервера).
    * Меняется только вручную — тембр в разговоре сам не «скачет» */
   voiceId?: string
+  /** Громкость голоса 0-100 (голосовая команда «громкость 40») */
+  volume?: number
 }
 
 /** Подписи голосов для тултипа в UI (белый список = /api/tts) */
@@ -122,6 +124,7 @@ function cleanForSpeech(text: string): string {
 export function useTtsQueue(options: UseTtsQueueOptions = {}) {
   const { onFinish, onPlaybackBlocked } = options
   const voiceId = options.voiceId ?? DEFAULT_VOICE_ID
+  const volume = options.volume ?? 100
 
   const [speaking, setSpeaking] = useState(false)
   /** true, когда звук заблокирован браузером и мы ждём касания экрана */
@@ -141,12 +144,21 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
   const inflightPrefetchRef = useRef(0)
   const optsRef = useRef({ onFinish, onPlaybackBlocked, voiceId })
   const blockedRef = useRef(false)
+  /** Громкость голоса: применяется через GainNode к текущим и будущим фразам */
+  const volumeRef = useRef(Math.min(100, Math.max(0, Math.round(options.volume ?? 100))))
+  const gainRef = useRef<GainNode | null>(null)
   /** Разблокировка по statechange контекста: присваивается после объявления pump */
   const tryUnblockRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     optsRef.current = { onFinish, onPlaybackBlocked, voiceId }
   }, [onFinish, onPlaybackBlocked, voiceId])
+
+  useEffect(() => {
+    const vol = Math.min(100, Math.max(0, Math.round(volume ?? 100)))
+    volumeRef.current = vol
+    if (gainRef.current) gainRef.current.gain.value = vol / 100
+  }, [volume])
 
   const ensureCtx = useCallback((): AudioContext | null => {
     if (typeof window === 'undefined') return null
@@ -226,6 +238,12 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
         // лёгкий детерминированный джиттер, чтобы голос звучал живее
         source.playbackRate.value = clamp(jitter(sentence, 0.02), 0.9, 1.1)
         sourceRef.current = source
+        // Громкость через общий GainNode — команда «тише» действует мгновенно
+        if (!gainRef.current) {
+          gainRef.current = ctx.createGain()
+          gainRef.current.gain.value = volumeRef.current / 100
+          gainRef.current.connect(ctx.destination)
+        }
         let settled = false
         const finishOnce = () => {
           if (settled) return
@@ -245,7 +263,7 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
           finishOnce()
         }, (buffer.duration / 0.9) * 1000 + 4000)
         source.onended = finishOnce
-        source.connect(ctx.destination)
+        source.connect(gainRef.current)
         source.start()
       })
     },

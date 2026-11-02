@@ -9,7 +9,7 @@
  *  - всё остальное — только сеть; при отсутствии сети отдаём закэшированную
  *    оболочку «/», чтобы приложение хотя бы открылось.
  */
-const CACHE = 'daria-shell-v1'
+const CACHE = 'daria-shell-v2'
 const SHELL = ['/', '/icons/icon-192.png', '/icons/icon-512.png', '/logo.svg']
 
 self.addEventListener('install', (event) => {
@@ -39,7 +39,11 @@ self.addEventListener('fetch', (event) => {
   // Стриминг чата/озвучки/поиска — только сеть, без посредника
   if (url.pathname.startsWith('/api/')) return
 
-  // Неизменяемые статические ресурсы — cache-first
+  // Неизменяемые статические ресурсы — cache-first.
+  // НО: это верно только для прода — у дев-чанков Turbopack имя постоянное
+  // (заканчивается на «._.js»), а код меняется при каждой правке; закэшированный
+  // дев-чанк = приложение навсегда застряло на старом коде. Их — только сеть
+  if (url.pathname.endsWith('._.js')) return
   if (url.pathname.startsWith('/_next/static/') || url.pathname.startsWith('/icons/')) {
     event.respondWith(
       caches.match(req).then(

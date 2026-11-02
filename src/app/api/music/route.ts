@@ -30,6 +30,12 @@ const searchCache = new Map<string, { tracks: MusicTrack[]; ts: number }>()
 const CACHE_MAX = 60
 const CACHE_TTL_MS = 10 * 60 * 1000
 
+/** Все прямые потоки играем через наш стрим-прокси: он ставит правильный
+ * Referer, тянет http-радио на https-страницу и переживает hotlink-защиту */
+function proxied(url: string): string {
+  return `/api/music/stream?url=${encodeURIComponent(url)}`
+}
+
 /* ──────────────────────────── Источник 1: Mp3.mn ────────────────────────────
  * Пользовательский выбор: mp3.mn — большой каталог музыки с прямыми mp3.
  * Поиск: GET /?song=…, в выдаче у каждого трека button.playlist-play c
@@ -59,7 +65,14 @@ async function searchMp3mn(query: string): Promise<MusicTrack[]> {
       signal: AbortSignal.timeout(9000),
     })
     if (!res.ok) return []
-    const html = await res.text()
+    // Некоторые страницы mp3.mn отдаются в windows-1251 — если в UTF-8
+    // декодировании появились затертые байты (U+FFFD) или типичная кириллическая
+    // кракозябра «Ð»/«Ñ», перекодируем
+    const buf = await res.arrayBuffer()
+    let html = new TextDecoder('utf-8').decode(buf)
+    if (html.includes('\uFFFD') || /[\u00D0\u00D1][\u0080-\u00BF]/.test(html)) {
+      html = new TextDecoder('windows-1251').decode(buf)
+    }
     const tracks: MusicTrack[] = []
     const liRe = /<li[^>]*>[\s\S]*?<\/li>/g
     let m: RegExpExecArray | null
@@ -75,7 +88,7 @@ async function searchMp3mn(query: string): Promise<MusicTrack[]> {
         title: (stripTags(title) || 'Без названия').slice(0, 120),
         author: stripTags(artist).slice(0, 80),
         url: page ? `https://mp3.mn${page}` : 'https://mp3.mn',
-        audioSrc: audio,
+        audioSrc: proxied(audio),
       })
     }
     return tracks
@@ -113,12 +126,14 @@ async function searchRadio(query: string): Promise<MusicTrack[]> {
     if (!res.ok) return []
     const list = (await res.json()) as RadioStation[]
     if (!Array.isArray(list)) return []
+    // http-потоки тоже берём: стрим-прокси отдаёт их странице по https
     return list
       .filter((s) => {
         const url = s.url_resolved ?? ''
         const codec = (s.codec ?? '').toLowerCase()
         return (
-          url.startsWith('https://') &&
+          url.startsWith('http') &&
+          !url.endsWith('.pls') &&
           s.lastcheckok !== 0 &&
           (codec === '' || codec.includes('mp3') || codec.includes('aac'))
         )
@@ -130,7 +145,7 @@ async function searchRadio(query: string): Promise<MusicTrack[]> {
         author: 'интернет-радио',
         artwork: s.favicon?.startsWith('https://') ? s.favicon : undefined,
         url: s.homepage ?? s.url_resolved ?? '',
-        audioSrc: s.url_resolved,
+        audioSrc: s.url_resolved ? proxied(s.url_resolved) : undefined,
       }))
   } catch {
     return []
@@ -257,17 +272,30 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    // Источники ищем параллельно: Mp3.mn — полные треки, radio-browser —
-    // живое радио, YouTube — запасной вариант
+    // Источники ищем параллельно и СМЕШИВАЕМ в одной очереди: если движок
+    // не смог заиграть конкретный трек, плеер сам перейдёт к следующему
+    // (mp3-файл → youtube-видео → радио) — музыка не застревает
     const [mp3mn, radio, youtube] = await Promise.all([
       searchMp3mn(query),
       searchRadio(generic ? 'музыка' : query),
       searchYouTube(query),
     ])
 
-    let tracks: MusicTrack[] = [...mp3mn, ...radio]
-    if (tracks.length < 3) tracks = [...tracks, ...youtube]
-    tracks = tracks.slice(0, 10)
+    const seen = new Set<string>()
+    const tracks: MusicTrack[] = []
+    const pushAll = (list: MusicTrack[]) => {
+      for (const t of list) {
+        const key = t.videoId ?? t.audioSrc ?? t.title
+        if (seen.has(key)) continue
+        seen.add(key)
+        tracks.push(t)
+        if (tracks.length >= 10) return
+      }
+    }
+    pushAll(mp3mn.slice(0, 4))
+    pushAll(youtube.slice(0, 4))
+    pushAll(radio.slice(0, 3))
+    if (tracks.length < 3) pushAll([...mp3mn, ...youtube, ...radio])
 
     if (searchCache.size >= CACHE_MAX) {
       const oldest = searchCache.keys().next().value
