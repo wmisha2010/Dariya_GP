@@ -52,3 +52,13 @@ prompt
 server.log
 # Skills directory
 /skills/
+# ── GitHub publish prep: local data & artifacts ──
+!.env.example
+db/*.db*
+models/
+tmp/
+tool-results/
+upload/
+download/
+scripts/*.png
+*.pid
