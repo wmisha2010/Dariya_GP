@@ -7,6 +7,8 @@
  *    ссылками: фоновый плеер есть только в веб-версии;
  *  - быстрые ответы (привет, как дела, кто ты, время, дата, помощь) работают
  *    БЕЗ ИИ-ключей — в характере Дарии;
+ *  - веб-поиск (DuckDuckGo) для свежих данных: погода, новости, курсы —
+ *    результаты подмешиваются в контекст LLM;
  *  - всё остальное → LLM (OpenRouter → Gemini, те же модели, что в вебе);
  *    без ключей — вежливая заглушка.
  *
@@ -113,6 +115,7 @@ const THANKS = [
 const HELP_TEXT = [
   'Что я умею в телеге 😄',
   '• болтать — напиши «Дария, …» и любой вопрос;',
+  '• «Дария, погугли …» — схожу в интернет за свежим: погода, новости, курсы;',
   '• «Дария, включи радио/музыку» — дам ссылку на мою веб-версию с плеером;',
   '• скинешь ссылку ютуб — отреагирую;',
   '• время, дата, шутки и подколы — без очереди.',
@@ -151,6 +154,147 @@ export function formatDate(tz = 'Europe/Moscow') {
   return new Intl.DateTimeFormat('ru-RU', {
     weekday: 'long', day: 'numeric', month: 'long', timeZone: tz,
   }).format(new Date())
+}
+
+// ── Веб-поиск (свежие данные для LLM) ────────────────────────────────────
+
+/** Явные команды поиска */
+const SEARCH_VERBS_RE = /(погугли|загугли|поищи|поищ|поиск\s+в\s+интернете|найди\s+(в\s+интернете|в\s+сети)|посмотри\s+в\s+интернете)/i
+
+/** Темы, где без свежих данных нечего делать */
+const SEARCH_HINTS_RE = /погода|новост|курс [а-яё]|курс\b.*(доллар|евро|рубл|биткоин|юан)|доллар.*(подорожал|подешевел|курс)|биткоин|эфириум|крипт|кто победил|сч[её]т матча|счет матча|итог(ы)? матча|сколько (стоит|стоят)|стоимость|цена|цены на|дата выхода|когда выйдет|когда вышл[ао]|последн(ие|яя) (новост|серия|сезон|версия|релиз|обновлени)|свеж(ие|ая) новост|тренд|расписание|премьер[аы]|кто такой|кто такая/i
+
+/** Нужен ли веб-поиск для этой фразы */
+export function needsWebSearch(text) {
+  const t = (text || '').toLowerCase()
+  if (!t) return false
+  return SEARCH_VERBS_RE.test(t) || SEARCH_HINTS_RE.test(t)
+}
+
+/** Из команды убираем поисковые глаголы — остальное уходит в DuckDuckGo */
+export function buildSearchQuery(command) {
+  let q = (command || '')
+    .replace(/^(погугли|загугли|поищи|поищ|найди|посмотри)\s*(в\s*интернете|в\s*сети)?\s*[,!.?]*\s*/i, '')
+    .replace(/^(в\s+интернете|в\s+сети)\s*/i, '')
+    .trim()
+  return q || (command || '').trim()
+}
+
+function stripTags(s) {
+  return (s || '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;|&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** Вытаскиваем настоящую ссылку из редиректа DuckDuckGo (/l/?uddg=…) */
+function decodeDdgHref(href) {
+  const m = (href || '').match(/[?&]uddg=([^&]+)/)
+  if (m) {
+    try { return decodeURIComponent(m[1]) } catch { return '' }
+  }
+  let h = href || ''
+  if (h.startsWith('//')) h = 'https:' + h
+  return h
+}
+
+/** Якоря с заданным классом (атрибуты в любом порядке, кавычки любые) */
+function parseAnchors(html, className) {
+  const out = []
+  const re = /<a\s+([^>]*?)>([\s\S]*?)<\/a>/g
+  let m
+  while ((m = re.exec(html))) {
+    const attrs = m[1]
+    if (!new RegExp(`class=['"][^'"]*\\b${className}\\b`).test(attrs)) continue
+    const href = attrs.match(/href=['"]([^'"]+)['"]/)?.[1] || ''
+    out.push({ href, text: m[2] })
+  }
+  return out
+}
+
+/** Парсер выдачи html.duckduckgo.com/html */
+export function parseDdgHtml(html, max = 5) {
+  const titles = parseAnchors(html, 'result__a')
+  const snippets = parseAnchors(html, 'result__snippet')
+  const out = []
+  for (let i = 0; i < titles.length && out.length < max; i++) {
+    const url = decodeDdgHref(titles[i].href)
+    const title = stripTags(titles[i].text)
+    const snippet = stripTags(snippets[i]?.text || '')
+    if (!title || !/^https?:\/\//.test(url)) continue
+    if (/duckduckgo\.com\/y\.js|duck\.co/.test(url)) continue // реклама
+    out.push({ title, url, snippet })
+  }
+  return out
+}
+
+/** Парсер выдачи lite.duckduckgo.com (запасной) */
+export function parseDdgLiteHtml(html, max = 5) {
+  const links = parseAnchors(html, 'result-link')
+  const snippets = [...html.matchAll(/<td[^>]*class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/g)]
+  const out = []
+  for (let i = 0; i < links.length && out.length < max; i++) {
+    const url = decodeDdgHref(links[i].href)
+    const title = stripTags(links[i].text)
+    const snippet = stripTags(snippets[i]?.[1] || '')
+    if (!title || !/^https?:\/\//.test(url)) continue
+    out.push({ title, url, snippet })
+  }
+  return out
+}
+
+const SEARCH_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
+
+/**
+ * Поиск в DuckDuckGo. Возвращает [{ title, url, snippet }] (до limit),
+ * при любой неудаче — [] (LLM ответит из своих знаний).
+ */
+export async function webSearch(query, opts = {}) {
+  const q = (query || '').trim()
+  if (!q) return []
+  const max = opts.limit || 5
+  const headers = {
+    'User-Agent': SEARCH_UA,
+    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+  }
+  try {
+    const res = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), {
+      headers,
+      signal: AbortSignal.timeout(8000),
+    })
+    if (res.ok) {
+      const results = parseDdgHtml(await res.text(), max)
+      if (results.length) return results
+    }
+  } catch { /* пробуем lite */ }
+  try {
+    const res = await fetch('https://lite.duckduckgo.com/lite/?q=' + encodeURIComponent(q), {
+      headers,
+      signal: AbortSignal.timeout(8000),
+    })
+    if (res.ok) return parseDdgLiteHtml(await res.text(), max)
+  } catch { /* интернета сегодня не будет */ }
+  return []
+}
+
+/** Блок-контекст с результатами поиска для LLM */
+export function formatSearchContext(results, query) {
+  if (!results || !results.length) return ''
+  const lines = results.map(
+    (r, i) => `${i + 1}. ${r.title}${r.snippet ? ' — ' + r.snippet : ''} (${r.url})`,
+  )
+  return [
+    `[Результаты веб-поиска по запросу «${query}» — только что из интернета]`,
+    ...lines,
+    'Опирайся на эти данные в ответе; можешь упомянуть, что только что погуглила. Если данных мало — скажи честно.',
+  ].join('\n')
 }
 
 const YOUTUBE_LINK_RE = /(https?:\/\/)?(www\.)?(youtube\.com\/\S+|youtu\.be\/\S+)/i
@@ -213,6 +357,9 @@ export const SYSTEM_PROMPT = [
   'Темы про несовершеннолетних, принуждение и незаконное — жёсткое нет: осади с юмором и переведи разговор.',
   'Это Telegram-чат: отвечай КРАТКО, 1–4 предложения, без markdown и списков; эмодзи — изредка, по одному.',
   'Никогда не начинай ответ с имени собеседника. Не представляйся, если не спросили.',
+  'Ты живёшь в облаке (Cloudflare), а не «локально»; в интернет выходишь только через встроенный поиск.',
+  'Если приложен блок [Результаты веб-поиска] — опирайся на эти данные и можешь похвастаться, что только что погуглила.',
+  'Если такого блока нет, а спрашивают про «прямо сейчас» — честно скажи, что в сеть не заглядывала, и предложи: «попроси — погуглю».',
   'Если просят помощь по музыке: у тебя нет плеера в Telegram, радио и музыка живут в твоей веб-версии.',
 ].join(' ')
 
@@ -222,12 +369,15 @@ const OPENROUTER_FALLBACKS = ['recursive/flint-v1.0:free', 'dots-studio/dots-3-n
 /**
  * history: [{role: 'user'|'assistant', content: string}] — последние ходы,
  * последняя запись — текущая реплика пользователя.
+ * opts.webContext — блок с результатами веб-поиска (см. formatSearchContext).
  * Возвращает текст ответа или null, если ни один провайдер не ответил.
  */
 export async function askLLM(history, opts = {}) {
   const openrouterKey = opts.openrouterKey || ''
   const geminiKey = opts.geminiKey || ''
   const primary = opts.openrouterModel || 'poolside/laguna-s-2.1:free'
+  const webContext = opts.webContext || ''
+  const system = webContext ? `${SYSTEM_PROMPT}\n\n${webContext}` : SYSTEM_PROMPT
 
   if (openrouterKey) {
     const models = [primary, ...OPENROUTER_FALLBACKS.filter((m) => m !== primary)]
@@ -241,7 +391,7 @@ export async function askLLM(history, opts = {}) {
         },
         body: JSON.stringify({
           models,
-          messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...history],
+          messages: [{ role: 'system', content: system }, ...history],
           temperature: 0.9,
           max_tokens: 500,
         }),
@@ -264,7 +414,7 @@ export async function askLLM(history, opts = {}) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+            systemInstruction: { parts: [{ text: system }] },
             contents: history.map((m) => ({
               role: m.role === 'assistant' ? 'model' : 'user',
               parts: [{ text: m.content }],

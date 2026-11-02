@@ -8,6 +8,11 @@ import {
   extractCommand,
   resolveCommand,
   askLLM,
+  needsWebSearch,
+  buildSearchQuery,
+  parseDdgHtml,
+  parseDdgLiteHtml,
+  formatSearchContext,
 } from './src/brain.js'
 
 let passed = 0
@@ -136,6 +141,59 @@ console.log('── Медиа-команды ──')
 {
   const r = resolveCommand('youtu.be/dQw4w9WgXcQ')
   check('короткая youtu.be-ссылка → https', r.handled && r.text.includes('https://youtu.be/dQw4w9WgXcQ'))
+}
+
+console.log('── Веб-поиск: когда искать ──')
+check('погода → искать', needsWebSearch('погода в Красноярске'))
+check('погугли котиков → искать', needsWebSearch('погугли котиков'))
+check('курс доллара → искать', needsWebSearch('какой сейчас курс доллара'))
+check('новости → искать', needsWebSearch('расскажи последние новости'))
+check('сколько стоит айфон → искать', needsWebSearch('сколько стоит айфон 17'))
+check('кто победил → искать', needsWebSearch('кто победил вчера в финале'))
+check('когда выйдет фильм → искать', needsWebSearch('когда выйдет второй сезон'))
+check('«как дела» → НЕ искать', !needsWebSearch('как дела'))
+check('«расскажи анекдот» → НЕ искать', !needsWebSearch('расскажи анекдот'))
+check('«ты кто» → НЕ искать', !needsWebSearch('ты кто'))
+check('пустая строка → НЕ искать', !needsWebSearch(''))
+
+console.log('── Веб-поиск: запрос и формат ──')
+check('«погугли котиков» → запрос «котиков»', buildSearchQuery('погугли котиков') === 'котиков')
+check('«поищи в интернете погоду» → «погоду»', buildSearchQuery('поищи в интернете погоду') === 'погоду')
+check('обычный текст не режется', buildSearchQuery('погода в Москве') === 'погода в Москве')
+{
+  const ctx = formatSearchContext(
+    [{ title: 'Погода', url: 'https://pogoda.ru', snippet: 'Сегодня солнечно' }],
+    'погода в Москве',
+  )
+  check('контекст: есть запрос', ctx.includes('погода в Москве'))
+  check('контекст: есть заголовок', ctx.includes('Погода'))
+  check('контекст: есть сниппет', ctx.includes('Сегодня солнечно'))
+  check('контекст: пустая выдача → пустая строка', formatSearchContext([], 'тест') === '')
+}
+
+console.log('── Веб-поиск: парсеры выдачи ──')
+{
+  const html = [
+    '<div class="result results_links">',
+    '<a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fpogoda.ru%2Fmsk&amp;rut=abc" class="result__a">Погода в <b>Москве</b></a>',
+    '<a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fpogoda.ru%2Fmsk&amp;rut=abc">Сегодня +20, &amp;солнечно</a>',
+    '</div>',
+    '<a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fduckduckgo.com%2Fy.js%3Fad_provider%3Dx" class="result__a">Реклама</a>',
+  ].join('')
+  const out = parseDdgHtml(html, 5)
+  check('html-выдача: 1 результат (реклама отфильтрована)', out.length === 1)
+  check('html-выдача: чистый url из uddg', out[0]?.url === 'https://pogoda.ru/msk')
+  check('html-выдача: теги вырезаны', out[0]?.title === 'Погода в Москве')
+  check('html-выдача: сущности декодированы', out[0]?.snippet.includes('солнечно'))
+}
+{
+  const lite = [
+    "<a rel=\"nofollow\" href='https://lite.example.ru/1' class='result-link'>Курс доллара</a>",
+    "<td class='result-snippet'>Доллар — 80 рублей</td>",
+  ].join('')
+  const out = parseDdgLiteHtml(lite, 5)
+  check('lite-выдача: результат найден', out.length === 1 && out[0].url === 'https://lite.example.ru/1')
+  check('lite-выдача: сниппет на месте', out[0]?.snippet === 'Доллар — 80 рублей')
 }
 
 console.log('── Без ИИ-ключей ──')

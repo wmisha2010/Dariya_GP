@@ -17,6 +17,10 @@ import {
   resolveCommand,
   askLLM,
   NO_BRAIN,
+  needsWebSearch,
+  webSearch,
+  formatSearchContext,
+  buildSearchQuery,
 } from './brain.js'
 
 export interface Env {
@@ -28,11 +32,12 @@ export interface Env {
   GEMINI_MODEL?: string
   TIMEZONE?: string
   WEB_APP_URL?: string
+  WEB_SEARCH?: string
 }
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.2 (brain v2.5)'
+const VERSION = 'v0.3 (brain v2.6)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -126,12 +131,22 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   while (history.length > HISTORY_MAX_TURNS * 2) history.shift()
   chatHistory.set(chatId, history)
 
+  // 2а) Свежие данные? Ходим в DuckDuckGo и подмешиваем выдачу в контекст
+  let webContext = ''
+  if ((env.WEB_SEARCH || '') !== 'off' && needsWebSearch(command)) {
+    try {
+      const results = await webSearch(buildSearchQuery(command))
+      webContext = formatSearchContext(results, command)
+    } catch { /* без поиска — ответим из знаний */ }
+  }
+
   const llmText = await askLLM(history, {
     openrouterKey: env.OPENROUTER_API_KEY || '',
     openrouterModel: env.OPENROUTER_MODEL || '',
     geminiKey: env.GEMINI_API_KEY || '',
     geminiBaseUrl: env.GEMINI_BASE_URL || '',
     geminiModel: env.GEMINI_MODEL || '',
+    webContext,
   })
 
   let reply: string
@@ -170,6 +185,7 @@ async function handleStatus(env: Env): Promise<Response> {
       : env.GEMINI_API_KEY
         ? '<p>Мозг: подключён ✅ <small>(Gemini)</small></p>'
         : '<p>Мозг: НЕ подключён 😴 — добавьте секрет OPENROUTER_API_KEY</p>',
+    `<p>Веб-поиск: ${env.WEB_SEARCH === 'off' ? 'выключен 🚫' : 'включён 🌐 (DuckDuckGo)'}</p>`,
     webhookInfo,
     '<p>Setup: <code>/setup?bot_token=ТОКЕН</code></p>',
   ].join(''))
