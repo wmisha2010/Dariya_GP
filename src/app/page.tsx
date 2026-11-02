@@ -124,7 +124,15 @@ export default function Home() {
   const currentVoiceLabel =
     TTS_VOICES.find((v) => v.id === ttsVoice)?.name ?? TTS_VOICES[0].name
 
-  const tts = useTtsQueue({ voiceId: ttsVoice })
+  /** Браузер заблокировал автозапуск звука — объясняем, как включить */
+  const handlePlaybackBlocked = useCallback(() => {
+    toast({
+      title: 'Браузер заблокировал звук',
+      description: 'Коснись экрана в любом месте — и я продолжу говорить голосом.',
+    })
+  }, [toast])
+
+  const tts = useTtsQueue({ voiceId: ttsVoice, onPlaybackBlocked: handlePlaybackBlocked })
 
   ttsSpeakingRef.current = tts.speaking
   musicPlayingRef.current = music !== null
@@ -514,6 +522,15 @@ export default function Home() {
                 <p className="max-w-md text-sm italic text-white/45">«{interim}»</p>
               ) : (
                 <p className="max-w-md text-xs text-white/30">{STATUS_TEXT[assistantState]}</p>
+              )}
+              {/* Звук заблокирован autoplay-политикой — ждём первого касания */}
+              {tts.blocked && (
+                <p
+                  role="status"
+                  className="animate-pulse rounded-full border border-amber-400/40 bg-amber-400/10 px-3.5 py-1.5 text-xs font-medium text-amber-300"
+                >
+                  Коснись экрана — включу голос
+                </p>
               )}
             </div>
 

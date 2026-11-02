@@ -5,6 +5,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 interface UseTtsQueueOptions {
   /** Вызывается, когда вся очередь озвучена */
   onFinish?: () => void
+  /** Браузер заблокировал звук (autoplay-политика) — фразы ждут касания экрана.
+   * Вызывается один раз на эпизод блокировки */
+  onPlaybackBlocked?: () => void
   /** Выбранный пользователем голос (id из белого списка сервера).
    * Меняется только вручную — тембр в разговоре сам не «скачет» */
   voiceId?: string
@@ -108,12 +111,19 @@ function cleanForSpeech(text: string): string {
  * пропускается молча, но тембр в разговоре никогда не меняется сам. Текст
  * добавляется частями (enqueue) во время стриминга: завершённые предложения
  * звучат сразу. Мгновенная остановка (перебивание) через stop().
+ *
+ * Autoplay-политика: если браузер держит AudioContext заблокированным (свежая
+ * вкладка без «доверенных» взаимодействий — в отличие от iframe предпросмотра),
+ * очередь НЕ пропускает фразы молча, а встаёт на паузу: показываем подсказку,
+ * а после первого касания экрана продолжаем говорить ровно с прерванного места.
  */
 export function useTtsQueue(options: UseTtsQueueOptions = {}) {
-  const { onFinish } = options
+  const { onFinish, onPlaybackBlocked } = options
   const voiceId = options.voiceId ?? DEFAULT_VOICE_ID
 
   const [speaking, setSpeaking] = useState(false)
+  /** true, когда звук заблокирован браузером и мы ждём касания экрана */
+  const [blocked, setBlocked] = useState(false)
   const voiceName = VOICE_LABELS[voiceId] ?? VOICE_LABELS[DEFAULT_VOICE_ID]
 
   const generationRef = useRef(0)
@@ -127,11 +137,14 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
    * Ключ включает голос, чтобы после ручной смены голоса не играли старые фразы */
   const audioPrefetchRef = useRef(new Map<string, Promise<ArrayBuffer | null>>())
   const inflightPrefetchRef = useRef(0)
-  const optsRef = useRef({ onFinish, voiceId })
+  const optsRef = useRef({ onFinish, onPlaybackBlocked, voiceId })
+  const blockedRef = useRef(false)
+  /** Разблокировка по statechange контекста: присваивается после объявления pump */
+  const tryUnblockRef = useRef<() => void>(() => {})
 
   useEffect(() => {
-    optsRef.current = { onFinish, voiceId }
-  }, [onFinish, voiceId])
+    optsRef.current = { onFinish, onPlaybackBlocked, voiceId }
+  }, [onFinish, onPlaybackBlocked, voiceId])
 
   const ensureCtx = useCallback((): AudioContext | null => {
     if (typeof window === 'undefined') return null
@@ -141,9 +154,17 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
         (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
       if (!Ctor) return null
       ctxRef.current = new Ctor()
+      // Контекст снова разрешён (вернулись на вкладку, дали разрешение
+      // микрофону и т.п.) — снимаем блокировку и продолжаем говорить
+      ctxRef.current.onstatechange = () => {
+        if ((ctxRef.current?.state as string) === 'running') tryUnblockRef.current()
+      }
     }
-    if (ctxRef.current.state === 'suspended') {
-      void ctxRef.current.resume()
+    // 'interrupted' на части Safari тоже нужно будить — будим всё, кроме running
+    if (ctxRef.current.state !== 'running') {
+      void ctxRef.current.resume().catch(() => {
+        /* разблокируем жестом */
+      })
     }
     return ctxRef.current
   }, [])
@@ -152,6 +173,8 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
     generationRef.current++
     pumpingRef.current = false
     streamEndedRef.current = true
+    blockedRef.current = false
+    setBlocked(false)
     queueRef.current = []
     pendingRef.current = ''
     audioPrefetchRef.current.clear()
@@ -305,9 +328,9 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
    * сервера фраза пропускается молча: тембр в разговоре не меняется.
    */
   const speakSentence = useCallback(
-    async (sentence: string, generation: number): Promise<void> => {
+    async (sentence: string, generation: number): Promise<'played' | 'blocked' | 'skipped'> => {
       const clean = cleanForSpeech(sentence)
-      if (!clean) return
+      if (!clean) return 'skipped'
 
       const key = prefetchKey(clean)
       let prefetched = audioPrefetchRef.current.get(key) ?? null
@@ -318,14 +341,29 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
       }
 
       const bytes = await prefetched
-      if (generation !== generationRef.current) return
-      if (!bytes) return
+      if (generation !== generationRef.current) return 'skipped'
+      if (!bytes) return 'skipped'
 
       try {
         await playServerAudio(bytes, clean, generation)
-      } catch {
-        // WebAudio не смог проиграть (контекст не активен и т.п.) —
-        // фразу пропускаем: другой голос включать нельзя
+        return 'played'
+      } catch (error) {
+        // Контекст заблокирован autoplay-политикой браузера: возвращаем фразу
+        // в начало очереди и ждём касания экрана — после него продолжим
+        // говорить ровно с этого места (текст ответа и так виден в чате)
+        const message = error instanceof Error ? error.message : String(error)
+        if (message.includes('не активен')) {
+          queueRef.current.unshift(sentence)
+          if (!blockedRef.current) {
+            blockedRef.current = true
+            setBlocked(true)
+            optsRef.current.onPlaybackBlocked?.()
+          }
+          return 'blocked'
+        }
+        // Иной сбой воспроизведения — фразу пропускаем молча:
+        // другой голос включать нельзя
+        return 'skipped'
       }
     },
     [fetchServerAudio, playServerAudio, prefetchKey]
@@ -347,8 +385,13 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
             continue
           }
 
-          await speakSentence(sentence, generation)
+          const status = await speakSentence(sentence, generation)
           if (generation !== generationRef.current) return
+          if (status === 'blocked') {
+            // Ждём касания: выходим из насоса, очередь и генерация сохранены.
+            // pumpingRef сбросится в finally — разблокировка перезапустит pump
+            return
+          }
 
           // Следующие фразы качаем фоном прямо сейчас — пока звучит пауза
           ensurePrefetch(generation)
@@ -369,6 +412,15 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
     },
     [ensurePrefetch, speakSentence]
   )
+
+  /** Контекст ожил (жест/statechange) — снимаем блокировку и продолжаем говорить */
+  const tryUnblock = useCallback(() => {
+    if (!blockedRef.current) return
+    blockedRef.current = false
+    setBlocked(false)
+    void pump(generationRef.current)
+  }, [pump])
+  tryUnblockRef.current = tryUnblock
 
   const splitIntoSentences = (text: string): string[] => {
     const raw = text
@@ -460,20 +512,44 @@ export function useTtsQueue(options: UseTtsQueueOptions = {}) {
     })
   }, [])
 
-  // Прогреваем аудиоконтекст по первому взаимодействию (для воспроизведения MP3)
+  // ─── Разблокировка звука (autoplay-политика браузеров) ──────────────────
+  // Слушаем ВСЕ взаимодействия постоянно, а не только первое: мобильные
+  // браузеры и Safari приостанавливают контекст повторно — после запроса
+  // разрешения микрофона, сворачивания вкладки, открытия клавиатуры.
+  // Если озвучка стояла на паузе из-за блокировки — продолжаем её.
   useEffect(() => {
-    const warmup = () => {
-      ensureCtx()
+    const unlock = () => {
+      const ctx = ensureCtx()
+      if (!ctx) return
+      // iOS-трюк: беззвучный буфер прямо в жесте — Safari не «отпускает»
+      // контекст только от resume()
+      try {
+        const silent = ctx.createBuffer(1, 1, 22050)
+        const src = ctx.createBufferSource()
+        src.buffer = silent
+        src.connect(ctx.destination)
+        src.start(0)
+      } catch {
+        /* не критично */
+      }
+      tryUnblockRef.current()
     }
-    window.addEventListener('pointerdown', warmup, { once: true })
-    window.addEventListener('keydown', warmup, { once: true })
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') unlock()
+    }
+    window.addEventListener('pointerdown', unlock, { passive: true })
+    window.addEventListener('touchend', unlock, { passive: true })
+    window.addEventListener('keydown', unlock)
+    document.addEventListener('visibilitychange', onVisible)
     return () => {
-      window.removeEventListener('pointerdown', warmup)
-      window.removeEventListener('keydown', warmup)
+      window.removeEventListener('pointerdown', unlock)
+      window.removeEventListener('touchend', unlock)
+      window.removeEventListener('keydown', unlock)
+      document.removeEventListener('visibilitychange', onVisible)
     }
   }, [ensureCtx])
 
   useEffect(() => stop, [stop])
 
-  return { speak, enqueue, endStream, stop, speaking, voiceName }
+  return { speak, enqueue, endStream, stop, speaking, voiceName, blocked }
 }
