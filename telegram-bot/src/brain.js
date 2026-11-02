@@ -9,7 +9,7 @@
  *    БЕЗ ИИ-ключей — в характере Дарии;
  *  - веб-поиск (DuckDuckGo) для свежих данных: погода, новости, курсы —
  *    результаты подмешиваются в контекст LLM;
- *  - всё остальное → LLM (OpenRouter → Gemini, те же модели, что в вебе);
+ *  - всё остальное → LLM (Gemini — главный мозг, OpenRouter — запасной);
  *    без ключей — вежливая заглушка.
  *
  * Файл намеренно на чистом JS без импортов: тестируется в node (test-brain.mjs)
@@ -727,8 +727,10 @@ export const SYSTEM_PROMPT = [
   'Если просят помощь по музыке: у тебя нет плеера в Telegram, радио и музыка живут в твоей веб-версии.',
 ].join(' ')
 
-// ── LLM: OpenRouter → Gemini (те же модели, что в веб-версии) ────────────
+// ── LLM: Gemini (главный) → OpenRouter (запасной) ───────────────────────
 const OPENROUTER_FALLBACKS = ['recursive/flint-v1.0:free', 'dots-studio/dots-3-note-preview:free']
+/** Цепочка имён Gemini: основная → стабильные алиасы (если имя устарело — HTTP 404) */
+const GEMINI_FALLBACKS = ['gemini-flash-latest', 'gemini-2.5-flash']
 
 /**
  * history: [{role: 'user'|'assistant', content: string}] — последние ходы,
@@ -755,6 +757,48 @@ export async function askLLM(history, opts = {}) {
   }
   if (webContext) system += `\n\n${webContext}`
 
+  // Gemini — главный мозг: заметно умнее бесплатных моделей OpenRouter и не
+  // страдает ложными вызовами инструментов. Перебираем имена моделей: если
+  // конкретное устарело (HTTP 404), пробуем следующее из цепочки.
+  if (geminiKey) {
+    const base = (opts.geminiBaseUrl || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '')
+    const models = [...new Set([opts.geminiModel || 'gemini-3.8-flash', ...GEMINI_FALLBACKS])]
+    for (const model of models) {
+      try {
+        const res = await fetch(
+          `${base}/models/${model}:generateContent?key=${encodeURIComponent(geminiKey)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              systemInstruction: { parts: [{ text: system }] },
+              contents: history.map((m) => ({
+                role: m.role === 'assistant' ? 'model' : 'user',
+                parts: [{ text: m.content }],
+              })),
+              // 2048: у thinking-моделей часть бюджета съедают размышления —
+              // с 500 токенами ответ мог обрезаться до пустоты
+              generationConfig: { temperature: 0.9, maxOutputTokens: 2048 },
+            }),
+          },
+        )
+        if (res.ok) {
+          const data = await res.json()
+          const raw = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim()
+          const text = stripToolCallMarkup(raw)
+          if (text) return text
+          console.error(`[gemini] ${model}: пустой ответ после зачистки`)
+        } else {
+          const err = await res.text().catch(() => '')
+          console.error(`[gemini] ${model}: HTTP ${res.status} ${err.slice(0, 200)}`)
+        }
+      } catch (e) {
+        console.error(`[gemini] ${model}: ${e?.message || e}`)
+      }
+    }
+  }
+
+  // OpenRouter — запасной мозг (бесплатные модели, бывают капризными)
   if (openrouterKey) {
     const models = [primary, ...OPENROUTER_FALLBACKS.filter((m) => m !== primary)]
     try {
@@ -775,37 +819,11 @@ export async function askLLM(history, opts = {}) {
       if (res.ok) {
         const data = await res.json()
         const raw = data?.choices?.[0]?.message?.content?.trim()
-        // Модель могла «вызвать» поиск сырым тегом — зачищаем; пусто после зачистки → пробуем Gemini
+        // Модель могла «вызвать» поиск сырым тегом — зачищаем; пусто после зачистки → без ответа
         const text = stripToolCallMarkup(raw)
         if (text) return text
-      }
-    } catch { /* падаем на Gemini */ }
-  }
-
-  if (geminiKey) {
-    const base = (opts.geminiBaseUrl || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '')
-    const model = opts.geminiModel || 'gemini-3.8-flash'
-    try {
-      const res = await fetch(
-        `${base}/models/${model}:generateContent?key=${encodeURIComponent(geminiKey)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: system }] },
-            contents: history.map((m) => ({
-              role: m.role === 'assistant' ? 'model' : 'user',
-              parts: [{ text: m.content }],
-            })),
-            generationConfig: { temperature: 0.9, maxOutputTokens: 500 },
-          }),
-        },
-      )
-      if (res.ok) {
-        const data = await res.json()
-        const raw = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim()
-        const text = stripToolCallMarkup(raw)
-        if (text) return text
+      } else {
+        console.error(`[openrouter] HTTP ${res.status}`)
       }
     } catch { /* оба провайдера недоступны */ }
   }

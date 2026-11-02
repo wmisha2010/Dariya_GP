@@ -439,5 +439,87 @@ console.log('── Быстрое время на голое «Время» ─
   check('«время в Ачинске» НЕ быстрый (уйдёт в поиск)', resolveCommand('время в Ачинске', { tz }).handled === false)
 }
 
+console.log('── askLLM: Gemini главный, OpenRouter запасной ──')
+{
+  const realFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    if (String(url).includes('generativelanguage')) {
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: 'Ответ Гемини' }] } }] }),
+        { headers: { 'content-type': 'application/json' } },
+      )
+    }
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: 'Ответ OpenRouter' } }] }),
+      { headers: { 'content-type': 'application/json' } },
+    )
+  }
+  try {
+    const reply = await askLLM([{ role: 'user', content: 'привет' }], { openrouterKey: 'or', geminiKey: 'gk' })
+    check('Gemini отвечает первым, пока жив', reply === 'Ответ Гемини')
+    check('OpenRouter не вызывался, пока жив Gemini', calls.every((u) => u.includes('generativelanguage')))
+    check('первая модель — gemini-3.8-flash', (calls[0] || '').includes('models/gemini-3.8-flash:'))
+    check('ключ в query-параметре', (calls[0] || '').includes('key=gk'))
+  } finally { globalThis.fetch = realFetch }
+}
+{
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {} // тут ошибки ожидаемы — глушим шум в тестах
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    if (String(url).includes('generativelanguage')) {
+      return new Response('{"error":{"code":404,"message":"model not found"}}', { status: 404 })
+    }
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: 'Ответ OpenRouter' } }] }),
+      { headers: { 'content-type': 'application/json' } },
+    )
+  }
+  try {
+    const reply = await askLLM([{ role: 'user', content: 'привет' }], { openrouterKey: 'or', geminiKey: 'gk' })
+    const gModels = calls.filter((u) => u.includes('generativelanguage'))
+      .map((u) => (u.match(/models\/([^:]+):/) || [])[1])
+    check('Gemini лёг весь → ответ из OpenRouter', reply === 'Ответ OpenRouter')
+    check('перебрали цепочку Gemini: основная + 2 алиаса',
+      gModels.join(',') === 'gemini-3.8-flash,gemini-flash-latest,gemini-2.5-flash')
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+  }
+}
+{
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('generativelanguage')) {
+      // Gemini «вызывает» поиск сырым тегом — после зачистки пусто → запасной мозг
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: '<dots_function_call>web_search</dots_function_call>' }] } }] }),
+        { headers: { 'content-type': 'application/json' } },
+      )
+    }
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: 'Спасли из OpenRouter' } }] }),
+      { headers: { 'content-type': 'application/json' } },
+    )
+  }
+  try {
+    const reply = await askLLM([{ role: 'user', content: 'привет' }], { openrouterKey: 'or', geminiKey: 'gk' })
+    check('tool-call разметка в ответе Gemini → зачистка → OpenRouter', reply === 'Спасли из OpenRouter')
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+  }
+}
+{
+  const noKeys = await askLLM([{ role: 'user', content: 'привет' }], {})
+  check('без ключей → null (в чат уйдёт NO_BRAIN)', noKeys === null)
+}
+
 console.log(`\nИтого: ${passed} прошло, ${failed} упало`)
 process.exit(failed ? 1 : 0)

@@ -4,11 +4,13 @@
  * Маршруты:
  *   GET  /                      — статус-страница (жив ли воркер и webhook);
  *   GET  /setup?bot_token=...   — регистрация webhook у Telegram (одноразово);
+ *   GET  /search-test?q=...     — диагностика веб-поиска;
+ *   GET  /llm-test[&text=...]   — диагностика «мозга»: ключ Gemini, регион выхода, живой ответ;
  *   POST /telegram-webhook      — приём апдейтов от Telegram.
  *
  * Секреты (Dashboard → Worker → Settings → Variables and Secrets):
  *   TELEGRAM_BOT_TOKEN — токен от @BotFather (обязателен);
- *   OPENROUTER_API_KEY / GEMINI_API_KEY — «мозг» для свободных тем (опционально);
+ *   GEMINI_API_KEY — главный мозг, OPENROUTER_API_KEY — запасной (опционально);
  *   WEB_APP_URL — ссылка на веб-версию с плеером (по умолчанию — превью-песочница).
  */
 
@@ -40,7 +42,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.7 (brain v2.9)'
+const VERSION = 'v0.3.8 (brain v3.0)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -131,7 +133,7 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
     return
   }
 
-  // 2) Свободные темы — через LLM (OpenRouter → Gemini)
+  // 2) Свободные темы — через LLM (Gemini → OpenRouter)
   const history = chatHistory.get(chatId) ?? []
   const prevUserTexts = history.filter((h) => h.role === 'user').map((h) => h.content).slice(-4)
   history.push({ role: 'user', content: text }) // в контекст — исходная фраза
@@ -191,11 +193,11 @@ async function handleStatus(env: Env): Promise<Response> {
     '<h1>Дария-бот жива 😏</h1>',
     `<p>Версия: ${VERSION}</p>`,
     token ? '<p>Токен: задан ✅</p>' : '<p>Токен: НЕ задан — добавьте секрет TELEGRAM_BOT_TOKEN</p>',
-    env.OPENROUTER_API_KEY
-      ? `<p>Мозг: подключён ✅ <small>(OpenRouter: ${env.OPENROUTER_MODEL || 'по умолчанию'})</small></p>`
-      : env.GEMINI_API_KEY
-        ? '<p>Мозг: подключён ✅ <small>(Gemini)</small></p>'
-        : '<p>Мозг: НЕ подключён 😴 — добавьте секрет OPENROUTER_API_KEY</p>',
+    env.GEMINI_API_KEY
+      ? `<p>Мозг: подключён ✅ <small>(Gemini${env.GEMINI_MODEL ? ': ' + env.GEMINI_MODEL : ''}${env.OPENROUTER_API_KEY ? ' + запасной OpenRouter' : ''})</small></p>`
+      : env.OPENROUTER_API_KEY
+        ? `<p>Мозг: подключён ✅ <small>(OpenRouter: ${env.OPENROUTER_MODEL || 'по умолчанию'}; добавьте GEMINI_API_KEY — будет умнее)</small></p>`
+        : '<p>Мозг: НЕ подключён 😴 — добавьте секрет GEMINI_API_KEY или OPENROUTER_API_KEY</p>',
     `<p>Веб-поиск: ${env.WEB_SEARCH === 'off' ? 'выключен 🚫' : 'включён 🌐 (5 движков + Википедия)'}</p>`,
     webhookInfo,
     '<p>Setup: <code>/setup?bot_token=ТОКЕН</code></p>',
@@ -254,6 +256,79 @@ async function handleSearchTest(url: URL, env: Env): Promise<Response> {
   }
 }
 
+/** Диагностика «мозга»: откуда воркер ходит в сеть, жив ли ключ Gemini, тестовый ответ */
+async function handleLlmTest(url: URL, env: Env): Promise<Response> {
+  const json = (obj: any, status = 200) =>
+    new Response(JSON.stringify(obj, null, 2), {
+      status,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    })
+  const key = env.SEARCH_TEST_KEY || ''
+  if (key && url.searchParams.get('key') !== key) return json({ ok: false, error: 'неверный key' }, 403)
+
+  const out: Record<string, unknown> = { ok: true, version: VERSION }
+
+  // Откуда воркер ходит в интернет — регион важен: Google Gemini закрыт для части стран
+  try {
+    const r = await fetch('https://ipinfo.io/json', { signal: AbortSignal.timeout(5000) })
+    const j: any = await r.json()
+    out.egress = {
+      ip: j.ip,
+      city: j.city,
+      country: j.country,
+      colo: r.headers.get('cf-ray')?.split('-').pop() || '', // из какой коло ходили в сеть
+    }
+  } catch (e: any) {
+    out.egress = { error: String(e?.message || e) }
+  }
+
+  // Ключ Gemini жив? (список моделей — лёгкий запрос, полный ответ см. ?text=)
+  const geminiKey = env.GEMINI_API_KEY || ''
+  if (geminiKey) {
+    const base = (env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '')
+    try {
+      const r = await fetch(`${base}/models?pageSize=8&key=${encodeURIComponent(geminiKey)}`, {
+        signal: AbortSignal.timeout(8000),
+      })
+      const j: any = await r.json().catch(() => ({}))
+      out.gemini = r.ok
+        ? {
+            ok: true,
+            models: (j.models || []).map((m: any) => String(m.name || '').replace(/^models\//, '')).slice(0, 8),
+          }
+        : {
+            ok: false,
+            status: r.status,
+            code: j?.error?.status || '',
+            message: String(j?.error?.message || '').slice(0, 200),
+          }
+    } catch (e: any) {
+      out.gemini = { ok: false, error: String(e?.message || e) }
+    }
+  } else {
+    out.gemini = { ok: false, error: 'секрет GEMINI_API_KEY не задан' }
+  }
+
+  // Полный прогон мозга: ?text=Привет
+  const text = (url.searchParams.get('text') || '').trim()
+  if (text) {
+    const t0 = Date.now()
+    const reply = await askLLM(
+      [{ role: 'user', content: text }],
+      {
+        openrouterKey: env.OPENROUTER_API_KEY || '',
+        openrouterModel: env.OPENROUTER_MODEL || '',
+        geminiKey,
+        geminiBaseUrl: env.GEMINI_BASE_URL || '',
+        geminiModel: env.GEMINI_MODEL || '',
+        tz: env.TIMEZONE || 'Europe/Moscow',
+      },
+    )
+    out.answer = { reply: reply ?? null, ms: Date.now() - t0 }
+  }
+  return json(out)
+}
+
 async function handleWebhook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const token = env.TELEGRAM_BOT_TOKEN || ''
   if (!token) return new Response('no token', { status: 500 })
@@ -306,6 +381,7 @@ export default {
     if (url.pathname === '/' && request.method === 'GET') return handleStatus(env)
     if (url.pathname === '/setup' && request.method === 'GET') return handleSetup(url, env)
     if (url.pathname === '/search-test' && request.method === 'GET') return handleSearchTest(url, env)
+    if (url.pathname === '/llm-test' && request.method === 'GET') return handleLlmTest(url, env)
     if (url.pathname === '/telegram-webhook' && request.method === 'POST') return handleWebhook(request, env, ctx)
     return new Response('not found', { status: 404 })
   },
