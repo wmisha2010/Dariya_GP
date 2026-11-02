@@ -42,7 +42,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.10 (brain v3.1)'
+const VERSION = 'v0.3.11 (brain v3.1)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -270,9 +270,7 @@ async function handleLlmTest(url: URL, env: Env): Promise<Response> {
 
   // Какие переменные воркер РЕАЛЬНО видит (только имена, не значения) —
   // так ловим опечатки в имени секрета и «секрет не в тот раздел»
-  out.envKeys = Object.keys(env)
-    .filter((k) => /GEMINI|OPENROUTER|TELEGRAM|TIMEZONE|WEB_|SEARCH_TEST/i.test(k))
-    .sort()
+  out.envKeys = Object.keys(env).sort()
 
   // Откуда воркер ходит в интернет — регион важен: Google Gemini закрыт для части стран
   try {
