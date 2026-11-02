@@ -11,6 +11,19 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
+  async headers() {
+    return [
+      {
+        /* Сервис-воркер обязан всегда приходить свежим: закэшированный sw.js
+         * «приклеивает» старую версию приложения в браузере навсегда */
+        source: "/sw.js",
+        headers: [
+          { key: "Cache-Control", value: "no-cache, no-store, must-revalidate" },
+          { key: "Clear-Site-Data", value: '"cache"' },
+        ],
+      },
+    ];
+  },
 };
 
 export default nextConfig;
