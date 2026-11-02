@@ -730,7 +730,14 @@ export const SYSTEM_PROMPT = [
 ].join(' ')
 
 // ── LLM: Gemini (главный) → OpenRouter (запасной) ───────────────────────
-const OPENROUTER_FALLBACKS = ['recursive/flint-v1.0:free', 'dots-studio/dots-3-note-preview:free']
+// Живая цепочка бесплатных моделей (проверено по каталогу OpenRouter 2026-11-02):
+// poolside/laguna-s-2.1:free умерла (404 мгновенно), dots-3-note-preview выброшена —
+// она же источник сырых <dots_function_call> в чате
+export const OPENROUTER_CHAIN = [
+  'google/gemma-4-31b-it:free',
+  'recursive/flint-v1.0:free',
+  'google/gemma-4-26b-a4b-it:free',
+]
 /** Цепочка имён Gemini: основная → стабильные алиасы (если имя устарело — HTTP 404) */
 const GEMINI_FALLBACKS = ['gemini-flash-latest', 'gemini-2.5-flash']
 
@@ -743,7 +750,7 @@ const GEMINI_FALLBACKS = ['gemini-flash-latest', 'gemini-2.5-flash']
 export async function askLLM(history, opts = {}) {
   const openrouterKey = opts.openrouterKey || ''
   const geminiKey = opts.geminiKey || ''
-  const primary = opts.openrouterModel || 'poolside/laguna-s-2.1:free'
+  const primary = opts.openrouterModel || OPENROUTER_CHAIN[0]
   const webContext = opts.webContext || ''
   let system = SYSTEM_PROMPT
   if (opts.tz) {
@@ -805,7 +812,7 @@ export async function askLLM(history, opts = {}) {
 
   // OpenRouter — запасной мозг (бесплатные модели, бывают капризными)
   if (openrouterKey) {
-    const models = [primary, ...OPENROUTER_FALLBACKS.filter((m) => m !== primary)]
+    const models = [primary, ...OPENROUTER_CHAIN.filter((m) => m !== primary)]
     try {
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',

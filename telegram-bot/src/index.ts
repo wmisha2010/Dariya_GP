@@ -19,6 +19,7 @@ import {
   resolveCommand,
   askLLM,
   NO_BRAIN,
+  OPENROUTER_CHAIN,
   needsWebSearch,
   webSearch,
   formatSearchContext,
@@ -42,7 +43,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.13 (brain v3.1)'
+const VERSION = 'v0.3.14 (brain v3.1)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -325,6 +326,64 @@ async function handleLlmTest(url: URL, env: Env): Promise<Response> {
     }
   } else {
     out.gemini = { ok: false, error: 'секрет GEMINI_API_KEY не задан' }
+  }
+
+  // OpenRouter жив? Сначала ключ (лёгкий запрос /api/v1/key), затем минимальный
+  // прогон с той же цепочкой моделей, что у мозга — увидим настоящий код ошибки
+  const orKey = env.OPENROUTER_API_KEY || ''
+  if (orKey) {
+    try {
+      const kr = await fetch('https://openrouter.ai/api/v1/key', {
+        headers: { Authorization: `Bearer ${orKey}` },
+        signal: AbortSignal.timeout(8000),
+      })
+      const kj: any = await kr.json().catch(() => ({}))
+      out.openrouterKey = kr.ok
+        ? {
+            ok: true,
+            label: kj?.data?.label || '',
+            usage: kj?.data?.usage,
+            limit: kj?.data?.limit ?? 'без лимита',
+            free_tier: kj?.data?.is_free_tier,
+          }
+        : { ok: false, status: kr.status, message: String(kj?.error?.message || '').slice(0, 200) }
+    } catch (e: any) {
+      out.openrouterKey = { ok: false, error: String(e?.message || e) }
+    }
+    try {
+      const models = [env.OPENROUTER_MODEL || OPENROUTER_CHAIN[0], ...OPENROUTER_CHAIN.slice(1)].filter(
+        (m, i, a) => a.indexOf(m) === i,
+      )
+      const t0 = Date.now()
+      const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${orKey}`,
+          'Content-Type': 'application/json',
+          'X-Title': 'Daria Telegram Bot',
+        },
+        body: JSON.stringify({
+          models,
+          messages: [{ role: 'user', content: 'Скажи «привет» одним словом' }],
+          max_tokens: 16,
+        }),
+        signal: AbortSignal.timeout(15000),
+      })
+      const j: any = await r.json().catch(() => ({}))
+      out.openrouterTest = r.ok
+        ? { ok: true, model: j?.model || '', ms: Date.now() - t0 }
+        : {
+            ok: false,
+            status: r.status,
+            code: String(j?.error?.code ?? ''),
+            message: String(j?.error?.message || JSON.stringify(j?.error ?? j)).slice(0, 300),
+            ms: Date.now() - t0,
+          }
+    } catch (e: any) {
+      out.openrouterTest = { ok: false, error: String(e?.message || e) }
+    }
+  } else {
+    out.openrouterKey = { ok: false, error: 'секрет OPENROUTER_API_KEY не задан' }
   }
 
   // Полный прогон мозга: ?text=Привет
