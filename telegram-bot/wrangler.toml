@@ -1,0 +1,7 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "daria-bot"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+
+[observability]
+enabled = true

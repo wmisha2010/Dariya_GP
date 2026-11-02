@@ -75,6 +75,13 @@ src/
 └── lib/                          # Клиенты: db (Prisma), openrouter, gemini
 ```
 
+## Брат-близнец в Telegram
+
+У Дарии есть текстовая версия для Telegram — Cloudflare Worker в папке
+[`telegram-bot/`](telegram-bot/): читает группу, отвечает на «Дария, …»,
+болтает с тем же характером (OpenRouter/Gemini), медиа-команды отдаёт ссылками.
+Инструкция по установке за 15 минут — в [telegram-bot/README.md](telegram-bot/README.md).
+
 ## Что не входит в репозиторий
 
 - `.env` — ключи и локальные пути (есть шаблон `.env.example`);
