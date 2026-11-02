@@ -358,6 +358,55 @@ export async function cbrRates() {
   }
 }
 
+/** Запросы про погоду — точные данные wttr.in вместо сниппетов */
+const WEATHER_RE = /погод[аыу]|температур|на улице (тепло|холодно|жарко|мороз)/i
+const CITY_STOPWORDS = new Set([
+  'сегодня', 'завтра', 'сейчас', 'там', 'утром', 'днём', 'ночью', 'вечером', 'вечере', 'утре',
+  'дне', 'ночи', 'мире', 'улице', 'дворе', 'доме', 'качестве', 'россии', 'россия', 'который', 'числе',
+])
+
+/** Вытаскиваем город из фразы: «какая погода в Нижнем Новгороде завтра» → «Нижнем Новгороде» */
+export function extractWeatherCity(q) {
+  const t = String(q || '')
+  const found = []
+  const re = /(?:^|\s)(?:в|во|на)\s+([а-яё][а-яё\-]*(?:\s+[а-яё\-]+)?)/gi
+  let m
+  while ((m = re.exec(t))) {
+    const words = m[1].trim().split(/\s+/).filter((w) => !CITY_STOPWORDS.has(w.toLowerCase()))
+    if (words.length) found.push(words.join(' '))
+  }
+  if (found.length) return found[found.length - 1]
+  const m2 = t.match(/погод[а-яё]*\s+([А-ЯЁ][а-яё\-]+)/)
+  return m2 ? m2[1] : ''
+}
+
+/** Текущая погода + прогноз через wttr.in (без ключей, понимает русские названия) */
+export async function weatherLookup(q) {
+  const city = extractWeatherCity(q)
+  if (!city) throw new Error('город не указан')
+  const res = await fetch('https://wttr.in/' + encodeURIComponent(city) + '?format=j1&lang=ru', {
+    headers: { 'User-Agent': 'DariaBot/0.3 (personal assistant bot)' },
+    signal: AbortSignal.timeout(8000),
+  })
+  if (!res.ok) throw new Error('wttr ' + res.status)
+  const d = await res.json()
+  const c = d?.current_condition?.[0]
+  if (!c) throw new Error('wttr пусто')
+  const desc = c.lang_ru?.[0]?.value || c.weatherDesc?.[0]?.value || 'без осадков'
+  const today = d?.weather?.[0]
+  const tomorrow = d?.weather?.[1]
+  const name = d?.nearest_area?.[0]?.areaName?.[0]?.value || city
+  const place = /завтра/i.test(q) && tomorrow ? `Завтра в городе ${city}: от ${tomorrow.mintempC}° до ${tomorrow.maxtempC}°` : null
+  const now = `Сейчас в городе ${city}: ${c.temp_C}°C (ощущается как ${c.FeelsLikeC}°C), ${desc.toLowerCase()}, ветер ${c.windspeedKmph} км/ч, влажность ${c.humidity}%`
+  const range = today ? `. Днём сегодня от ${today.mintempC}° до ${today.maxtempC}°` : ''
+  return {
+    title: `Погода — ${name}`,
+    url: 'https://wttr.in/' + encodeURIComponent(city),
+    snippet: (place ? place + '. ' : '') + now + range + '. Данные wttr.in только что.',
+    engine: 'wttr.in',
+  }
+}
+
 /** Бинг прячет настоящие ссылки за редиректами /ck/a?...&u=a1<base64> — раскодируем */
 function decodeBingHref(href) {
   const m = href.replace(/&amp;/g, '&').match(/[?&]u=a1([A-Za-z0-9_-]+)/)
@@ -388,6 +437,15 @@ export async function webSearch(query, opts = {}) {
   const key = q.toLowerCase()
   const cached = searchCache.get(key)
   if (cached && Date.now() - cached.t < SEARCH_CACHE_TTL) return cached.r
+  // Погода — приоритет: точные данные wttr.in, если в запросе есть город
+  if (WEATHER_RE.test(q) && extractWeatherCity(q)) {
+    try {
+      const w = await weatherLookup(q)
+      if (searchCache.size > 50) searchCache.clear()
+      searchCache.set(key, { r: [w], t: Date.now() })
+      return [w]
+    } catch { /* wttr не ответил — обычный поиск */ }
+  }
   // Курсы валют — приоритет: точные данные ЦБ РФ, если доступны
   if (CURRENCY_RE.test(q)) {
     try {
@@ -443,7 +501,8 @@ const YOUTUBE_LINK_RE = /(https?:\/\/)?(www\.)?(youtube\.com\/\S+|youtu\.be\/\S+
 /** Поиск не был — убираем ложное «погуглила», чтобы Дария не врала */
 export function fixFalseGoogled(text) {
   if (!text || !/погуглил/i.test(text)) return text
-  return text.replace(/[Пп]огуглил[аи]?\b/g, (m) => (m[0] === 'П' ? 'Вспомнила' : 'вспомнила'))
+  // \b с кириллицей не работает — lookahead
+  return text.replace(/[Пп]огуглил[аи]?(?![а-яё])/g, (m) => (m[0] === 'П' ? 'Вспомнила' : 'вспомнила'))
 }
 
 /**

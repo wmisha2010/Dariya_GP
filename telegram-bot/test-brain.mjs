@@ -16,6 +16,8 @@ import {
   parseGoogleHtml,
   formatSearchContext,
   webSearch,
+  extractWeatherCity,
+  fixFalseGoogled,
 } from './src/brain.js'
 
 let passed = 0
@@ -294,7 +296,50 @@ console.log('── Контекст поиска: честность ──')
 {
   const ctx = formatSearchContext([{ title: 'Т', url: 'https://x.ru', snippet: 'С' }], 'тест')
   check('контекст: предупреждение о старых сниппетах', ctx.includes('старые данные'))
-  check('контекст: запрет выдумывать цифры', ctx.includes('не выдумывай цифры'))
+  check('контекст: запрет выдумывать цифры', ctx.includes('ДОСЛОВНО'))
+}
+
+console.log('── Погода: город и приоритет wttr.in ──')
+{
+  check('город: «погода в Красноярске»', extractWeatherCity('какая погода в Красноярске') === 'Красноярске')
+  check('город: «в Нижнем Новгороде завтра»', extractWeatherCity('погода в Нижнем Новгороде завтра') === 'Нижнем Новгороде')
+  check('город: без города → пусто', extractWeatherCity('какая погода') === '')
+  check('город: «на улице» не город', extractWeatherCity('что на улице, холодно?') === '')
+
+  const realFetch = globalThis.fetch
+  const wttrFixture = {
+    current_condition: [{ temp_C: '-10', FeelsLikeC: '-15', weatherDesc: [{ value: 'Light snow' }], lang_ru: [{ value: 'Слабый снег' }], windspeedKmph: '8', humidity: '80' }],
+    weather: [{ mintempC: '-12', maxtempC: '-5' }],
+    nearest_area: [{ areaName: [{ value: 'Тестоград' }] }],
+  }
+  globalThis.fetch = async (url) => {
+    if (/wttr\.in/.test(String(url))) return new Response(JSON.stringify(wttrFixture), { status: 200 })
+    return new Response('blocked', { status: 500 })
+  }
+  try {
+    const r = await webSearch('какая погода в Тестограде ' + Date.now())
+    check('погода: источник wttr.in', r[0]?.engine === 'wttr.in')
+    check('погода: температура в сниппете', r[0]?.snippet.includes('-10°C'))
+    check('погода: русское описание', r[0]?.snippet.includes('слабый снег'))
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+console.log('── Праздники/даты: поиск включается ──')
+{
+  check('праздник: «сегодня есть праздник» → поиск', needsWebSearch('Сегодня есть праздник в России?') === true)
+  check('дата: «какой сегодня день недели» → поиск', needsWebSearch('какой сегодня день недели') === true)
+  check('обычная болтовня → без поиска', needsWebSearch('как у тебя дела, красотка') === false)
+}
+
+console.log('── Честность: ложное «погуглила» ──')
+{
+  check('«Погуглила — курс» → «Вспомнила»', fixFalseGoogled('Погуглила — курс 80 ₽') === 'Вспомнила — курс 80 ₽')
+  check('«я погуглила в интернете» → «вспомнила»', fixFalseGoogled('я погуглила в интернете') === 'я вспомнила в интернете')
+  check('«погуглю» не трогаем', fixFalseGoogled('попроси — погуглю') === 'попроси — погуглю')
+  check('«погуглить» не трогаем', fixFalseGoogled('хочу погуглить') === 'хочу погуглить')
+  check('без слова — текст прежний', fixFalseGoogled('обычный ответ') === 'обычный ответ')
 }
 
 console.log(`\nИтого: ${passed} прошло, ${failed} упало`)
