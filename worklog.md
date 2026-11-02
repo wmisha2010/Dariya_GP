@@ -744,3 +744,20 @@ HTML страниц — свежий (вместе с выключателем) 
   origin добавлен без токена.
 - Замечание GitHub: models/piper/irina.onnx (60 МБ) сидит в старых коммитах
   истории (в HEAD его нет) — при желании можно подчистить rewrite'ом истории.
+
+## 2026-11-02 · Telegram-бот Дарии (Cloudflare Workers) — код готов
+- telegram-bot/: src/brain.js (порт мозга: триггеры Дария/Даша/Дуся/Алиса +
+  нечёткое сравнение «далее»→«дария», быстрые ответы без ИИ, медиа-команды →
+  ссылки на веб-версию, ютуб-линки, LLM OpenRouter→Gemini как в вебе),
+  src/index.ts (воркер: GET / статус, GET /setup?bot_token — setWebhook с
+  secret_token=sha256(токен+соль), POST /telegram-webhook с проверкой заголовка;
+  контекст диалога in-memory, 8 ходов), wrangler.toml, package.json.
+- test-brain.mjs: 36/36 зелёные (кириллический \b не работает — заменил на
+  lookahead (?![а-яё]); порядок чистки «ну даша, привет» исправлен).
+- wrangler deploy --dry-run: бандл 26.57 KiB, чисто.
+- README: деплой за 15 мин через Git-интеграцию Cloudflare (Install command:
+  cd telegram-bot && npm install; Deploy command: npx wrangler deploy),
+  обязательный Group Privacy → Turn off (иначе Telegram не доставит «Дария,
+  привет» в группе).
+- Деплой из песочницы невозможен (нет аккаунта Cloudflare) — шаги за
+  пользователем описаны в telegram-bot/README.md.
