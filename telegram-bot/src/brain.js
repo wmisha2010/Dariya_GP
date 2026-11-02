@@ -140,8 +140,8 @@ const MEDIA_YOUTUBE = [
   'Без ссылки не играю 😄 Кинь ютуб-линк, или заходи в веб-версию:',
 ]
 export const NO_BRAIN = [
-  'Вопрос приняла, но мой ИИ-мозг ещё не подключен 😅 Пусть хозяин добавит ключ OPENROUTER_API_KEY в настройках воркера — и я заговорю по-настоящему.',
-  'Хотела ответить умно, но ключ ИИ не задан 😄 Намекни моему хозяину: OPENROUTER_API_KEY в секретах воркера.',
+  'Мозг сегодня молчит — ни Gemini, ни OpenRouter не ответили 😅 Хозяину: проверь, задан ли секрет GEMINI_API_KEY, и не упёрлись ли бесплатные модели OpenRouter в лимиты.',
+  'Хотела ответить умно, но оба мозга промолчали 😄 Хозяину намёк: секрет GEMINI_API_KEY в воркере задан? А у OpenRouter сегодня лимиты?',
 ]
 
 export function formatTime(tz = 'Europe/Moscow') {
@@ -432,11 +432,13 @@ export function cityCandidates(raw) {
 /** Геокодер open-meteo: перебираем формы города, выбираем самое населённое совпадение */
 async function geocodeCity(raw) {
   const all = []
-  for (const name of cityCandidates(raw)) {
+  // Не более 3 форм города и по 4 с на запрос: иначе редкий город держит
+  // обработку слишком долго (в Telegram фон живёт ~30 с после ответа)
+  for (const name of cityCandidates(raw).slice(0, 3)) {
     try {
       const res = await fetch(
         'https://geocoding-api.open-meteo.com/v1/search?name=' + encodeURIComponent(name) + '&count=10&language=ru&format=json',
-        { headers: DARIA_UA, signal: AbortSignal.timeout(6000) },
+        { headers: DARIA_UA, signal: AbortSignal.timeout(4000) },
       )
       if (!res.ok) continue
       const d = await res.json()
@@ -780,6 +782,9 @@ export async function askLLM(history, opts = {}) {
               // с 500 токенами ответ мог обрезаться до пустоты
               generationConfig: { temperature: 0.9, maxOutputTokens: 2048 },
             }),
+            // 20 с на модель: медленный/зависший провайдер не должен съесть
+            // весь 30-секундный фон Telegram — бот лучше честно ответит заглушкой
+            signal: AbortSignal.timeout(20000),
           },
         )
         if (res.ok) {
@@ -815,6 +820,7 @@ export async function askLLM(history, opts = {}) {
           temperature: 0.9,
           max_tokens: 500,
         }),
+        signal: AbortSignal.timeout(25000),
       })
       if (res.ok) {
         const data = await res.json()
