@@ -139,6 +139,8 @@ export default function Home() {
   // Данные
   const [characters, setCharacters] = useState<Character[]>([])
   const [activeCharacter, setActiveCharacter] = useState<Character | null>(null)
+  /** Персонажи так и не загрузились после автоповторов — показываем кнопку «Повторить» */
+  const [charactersError, setCharactersError] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streamingText, setStreamingText] = useState('')
 
@@ -759,34 +761,40 @@ export default function Home() {
     }
   }, [])
 
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
+  /** Грузим персонажей с автоповторами: dev-сервер мог перезапускаться, сеть —
+   *  мигать. Без повторов одна неудача оставляла приложение навсегда на «Загрузке…» */
+  const loadCharacters = useCallback(
+    async (attempt = 0): Promise<boolean> => {
       try {
         const res = await fetch('/api/characters')
+        if (!res.ok) throw new Error(`status ${res.status}`)
         const json = await res.json()
         const list: Character[] = json.characters ?? []
-        if (cancelled) return
+        if (!list.length) throw new Error('empty list')
         setCharacters(list)
+        setCharactersError(false)
         const first = list.find((c) => c.isDefault) ?? list[0] ?? null
         if (first) {
           setActiveCharacter(first)
           await loadHistory(first.id)
         }
+        return true
       } catch {
-        if (!cancelled) {
-          toast({
-            title: 'Ошибка загрузки',
-            description: 'Не удалось загрузить персонажей',
-            variant: 'destructive',
-          })
+        // 5 попыток с нарастающей паузой 0.8с → 1.6с → 3.2с → 6.4с → 12.8с
+        if (attempt < 5) {
+          await new Promise((resolve) => setTimeout(resolve, 800 * 2 ** attempt))
+          return loadCharacters(attempt + 1)
         }
+        setCharactersError(true)
+        return false
       }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [])
+    },
+    [loadHistory]
+  )
+
+  useEffect(() => {
+    void loadCharacters()
+  }, [loadCharacters])
 
   // ─── Очистить чат ───────────────────────────────────────────────────────
   const clearChat = useCallback(async () => {
@@ -927,6 +935,22 @@ export default function Home() {
               aria-hidden="true"
               className="pointer-events-none fixed left-0 top-0 z-0 size-1.5 overflow-hidden opacity-[0.01]"
             />
+          )}
+
+          {/* Персонажи не загрузились после автоповторов — повтор вручную */}
+          {charactersError && !activeCharacter && (
+            <div className="mx-auto mb-2.5 w-fit rounded-2xl border border-red-400/30 bg-red-400/[0.06] px-4 py-2.5 text-center backdrop-blur-md">
+              <p className="text-xs text-red-200/90">Не удалось загрузить персонажей</p>
+              <button
+                onClick={() => {
+                  setCharactersError(false)
+                  void loadCharacters()
+                }}
+                className="mt-1.5 rounded-full border border-teal-400/40 bg-teal-400/10 px-3.5 py-1 text-xs font-medium text-teal-300 transition-colors hover:bg-teal-400/20"
+              >
+                Повторить
+              </button>
+            </div>
           )}
 
           {/* Звук заблокирован autoplay-политикой — ждём первого касания */}

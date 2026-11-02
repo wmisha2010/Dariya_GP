@@ -196,6 +196,11 @@ export function SettingsDialog({
             <span className="text-xs">Очистить чат</span>
           </Button>
         </section>
+
+        {/* Версия интерфейса: маркер свежего билда — если её видно, кэш побеждён */}
+        <p className="mt-4 text-center text-[10px] tracking-wide text-white/25">
+          Дария · интерфейс v2.1 · музыка и радио из интернета · 2 ноября 2026
+        </p>
       </DialogContent>
     </Dialog>
   )
