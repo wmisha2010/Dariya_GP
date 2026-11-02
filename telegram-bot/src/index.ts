@@ -39,7 +39,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.3 (brain v2.7)'
+const VERSION = 'v0.3.5 (brain v2.7)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -302,7 +302,7 @@ export default {
     if (url.pathname === '/' && request.method === 'GET') return handleStatus(env)
     if (url.pathname === '/setup' && request.method === 'GET') return handleSetup(url, env)
     if (url.pathname === '/search-test' && request.method === 'GET') return handleSearchTest(url, env)
-    if (url.pathname === '/telegram-webhook' && request.method === 'POST') return handleWebhook(request, env)
+    if (url.pathname === '/telegram-webhook' && request.method === 'POST') return handleWebhook(request, env, ctx)
     return new Response('not found', { status: 404 })
   },
 }
