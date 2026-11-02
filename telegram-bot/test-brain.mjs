@@ -15,6 +15,7 @@ import {
   parseBingHtml,
   parseGoogleHtml,
   formatSearchContext,
+  webSearch,
 } from './src/brain.js'
 
 let passed = 0
@@ -224,6 +225,25 @@ console.log('── Без ИИ-ключей ──')
   check('askLLM без ключей → null', r === null)
   const quick = resolveCommand('что такое звезда', {})
   check('свободная тема без ключей → ушла бы в LLM', !quick.handled)
+}
+
+console.log('── Веб-поиск: регрессия вызова движков ──')
+{
+  const realFetch = globalThis.fetch
+  const bingHtml =
+    '<li class="b_algo"><h2><a href="https://regress.ru/x">Регресс результат</a></h2><p>Сниппет регрессии</p></li>'
+  globalThis.fetch = async (url) => {
+    if (/bing\.com/.test(String(url))) return new Response(bingHtml, { status: 200 })
+    return new Response('blocked', { status: 500 })
+  }
+  try {
+    const r = await webSearch('регрессия движков ' + Date.now())
+    check('webSearch вернул массив, а не функцию', Array.isArray(r) && typeof r !== 'function')
+    check('webSearch: победил bing', r[0]?.engine === 'bing')
+    check('webSearch: результат распарсен', r[0]?.url === 'https://regress.ru/x' && r[0]?.title === 'Регресс результат')
+  } finally {
+    globalThis.fetch = realFetch
+  }
 }
 
 console.log(`\nИтого: ${passed} прошло, ${failed} упало`)

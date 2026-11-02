@@ -347,14 +347,16 @@ export async function webSearch(query, opts = {}) {
     'User-Agent': SEARCH_UA,
     'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
   }
-  const tasks = SEARCH_ENGINES.map(([name, engine]) => (async () => {
-    const { url, parse } = engine(q)
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(6000) })
-    if (!res.ok) throw new Error('status ' + res.status)
-    const results = parse(await res.text(), max)
-    if (!results.length) throw new Error('пусто')
-    return results.map((r) => ({ ...r, engine: name })) // метка победителя для диагностики
-  }))
+  const tasks = SEARCH_ENGINES.map(([name, engine]) =>
+    (async () => {
+      const { url, parse } = engine(q)
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(6000) })
+      if (!res.ok) throw new Error('status ' + res.status)
+      const results = parse(await res.text(), max)
+      if (!results.length) throw new Error('пусто')
+      return results.map((r) => ({ ...r, engine: name })) // метка победителя для диагностики
+    })(),
+  )
   tasks.push(wikipediaSearch(q, max).then((rs) => rs.map((r) => ({ ...r, engine: 'wikipedia' }))))
   let results = []
   try {
