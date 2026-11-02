@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/hooks/use-toast'
@@ -50,7 +50,7 @@ const WAKE_COMMAND_BLACKOUT_MS = 1200
 
 /** Метка текущей сборки: тост при загрузке показывает её, и пользователь
  *  мгновенно отличает живой билд от старого кэша в браузере */
-const BUILD_LABEL = 'v2.3 · 13:47'
+const BUILD_LABEL = 'v2.4 · 14:10'
 
 /** Голосовое управление музыкой: глаголы команды в любом месте фразы
  *  («найди в интернете музыку…», «сама включи…», «врубай рок»).
@@ -92,16 +92,83 @@ const DEFAULT_MUSIC_QUERIES = [
 ]
 
 /* ─────────────────────── Голосовая активация (как у Алисы) ─────────────────
- * Микрофон слушает постоянно: назови «Дария» — ассистент просыпается и
+ * Микрофон слушает постоянно: назови имя активации — ассистент просыпается и
  * выполняет следующую фразу. Названное во время её речи/музыки — перебивание.
  * Чтобы она не слышала саму себя: услышанное во время озвучки сравнивается
  * с текстом, который она произносит — совпадает = эхо, игнорируем.          */
 
-/** Активация: имя в начале фразы («Дария», «Дарья», «эй Дария») */
-const WAKE_WORD_RE = /(?:^|[,.!?;:\s—-])(?:дари[яю]|дарь[яеию])(?=$|[\s,.!?;:—-])/i
-/** Срезаем имя перед командой: «Дария, включи музыку» → «включи музыку» */
-const WAKE_STRIP_RE =
-  /^\s*(?:эй|ок(?:ей)?|слушай)?\s*[,.!?;:—-]?\s*(?:дари[яю]|дарь[яеию])\s*[,.!?;:—-]?\s*(?:пожалуйста\s*[,.!?;:]?\s*)?/i
+/** Имя активации выбирается в настройках. Для каждого — список вариантов, как
+ *  распознаватель пишет его на слух, включая свои ошибки: «Дарию» он часто
+ *  слышит как «далее». Короткое «Даша» по умолчанию — распознаётся надёжнее
+ *  редкого полного имени и почти не звучит в эфирах, поэтому играющее радио
+ *  не будит ассистент случайно */
+const WAKE_WORDS: Record<string, { label: string; variants: string[] }> = {
+  dasha: { label: 'Даша', variants: ['даша', 'дашу', 'даше', 'даши', 'дэша', 'дашенька'] },
+  daria: {
+    label: 'Дария',
+    variants: [
+      'дария', 'дарья', 'дарью', 'дарьи', 'дарье', 'дарии', 'дарина', 'дарине', 'дарин', 'дэрия', 'далее',
+    ],
+  },
+  dusya: { label: 'Дуся', variants: ['дуся', 'дуси', 'дусю', 'дусе', 'дусь', 'дюся'] },
+  alisa: { label: 'Алиса', variants: ['алиса', 'алису', 'алисе', 'алисы', 'алыса', 'алиска'] },
+}
+/** Имя активации по умолчанию — короткое и чётко распознаваемое */
+const DEFAULT_WAKE_WORD = 'dasha'
+/** Ключ localStorage: выбранное имя активации */
+const WAKE_WORD_KEY = 'daria-wake-word'
+
+/** Расстояние Левенштейна — насколько одно слово «похоже» на другое */
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0
+  if (!a.length) return b.length
+  if (!b.length) return a.length
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i)
+  for (let i = 1; i <= a.length; i++) {
+    const curr = [i]
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      )
+    }
+    prev = curr
+  }
+  return prev[b.length]
+}
+
+/** Слово совпадает с именем активации: точно или с опиской распознавателя
+ *  (не дальше 1–2 букв). Первая буква обязана совпадать, иначе «Маша» будила
+ *  бы «Дашу» */
+function isWakeToken(token: string, variants: string[]): boolean {
+  for (const v of variants) {
+    if (token === v) return true
+    if (token[0] === v[0] && levenshtein(token, v) <= (v.length >= 7 ? 2 : 1)) return true
+  }
+  return false
+}
+
+/** Есть ли имя активации в распознанной фразе (любое слово целиком):
+ *  «даша», «эй даша», «ну даша включай» — всё активирует */
+function matchesWake(clean: string, variants: string[]): boolean {
+  const tokens = clean.toLowerCase().match(/[а-яё]+/g) ?? []
+  return tokens.some((t) => isWakeToken(t, variants))
+}
+
+/** Срезаем имя активации из фразы — и в начале («эй Дария, включи музыку»),
+ *  и в середине («ну Дария, давай радио») — чтобы оно не попало в поиск */
+function makeWakeStripRe(variants: string[]): RegExp {
+  const alt = variants
+    .map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .sort((a, b) => b.length - a.length)
+    .join('|')
+  return new RegExp(
+    `(?:^|\\s)(?:(?:эй|ок(?:ей)?|слушай)\\s+)?(?:${alt})(?=$|[\\s,.!?;:—-])`,
+    'gi'
+  )
+}
+
 /** Сколько после активации ждём команду, прежде чем снова «заснуть» */
 const ATTENTION_MS = 12_000
 /** Ключ localStorage: запоминать ли безрукой режим между визитами */
@@ -241,6 +308,21 @@ export default function Home() {
 
   const currentVoiceLabel =
     TTS_VOICES.find((v) => v.id === ttsVoice)?.name ?? TTS_VOICES[0].name
+
+  // ─── Имя активации: выбирается в настройках, помним с прошлого визита ───
+  const [wakeWordId, setWakeWordId] = useState<string>(DEFAULT_WAKE_WORD)
+  useEffect(() => {
+    const saved = window.localStorage.getItem(WAKE_WORD_KEY)
+    if (saved && WAKE_WORDS[saved]) setWakeWordId(saved)
+  }, [])
+  /** Смена имени активации с сохранением выбора */
+  const setWakeWord = useCallback((id: string) => {
+    setWakeWordId(id)
+    window.localStorage.setItem(WAKE_WORD_KEY, id)
+  }, [])
+  const wake = WAKE_WORDS[wakeWordId] ?? WAKE_WORDS[DEFAULT_WAKE_WORD]
+  /** Срезальщик имени из фразы — пересобирается под выбранное имя */
+  const wakeStripRe = useMemo(() => makeWakeStripRe(wake.variants), [wake])
 
   // Восстанавливаем громкости с прошлого визита.
   // ВАЖНО: Number(null) === 0 — пустой localStorage «делал» громкость нулём,
@@ -669,20 +751,20 @@ export default function Home() {
     [activeCharacter, assistantLocalReply, music, musicPlayback, musicToggle, musicVolume, ttsVolume, changeMusicVolume, changeTtsVolume, toast, tts, keepAwake, deactivateAssistant]
   )
 
-  // ─── Микрофон: постоянное слушание + активация «Дария» ─────────────────
+  // ─── Микрофон: постоянное слушание + активация голосом ─────────────────
   const recognition = useSpeechRecognition({
     onInterim: (text) => {
       if (Date.now() < echoMuteUntilRef.current) return
       const clean = text.trim()
       // Пока Дария говорит (или играет музыка вне окна внимания) — ловим ТОЛЬКО
-      // имя «Дария»: это перебивание. Всё остальное услышанное — её голос
+      // имя активации: это перебивание. Всё остальное услышанное — её голос
       // или текст песни, молча глотаем (защита от слуха самой себя)
       if (ttsSpeakingRef.current || (musicPlayingRef.current && !awakeRef.current)) {
-        if (clean && WAKE_WORD_RE.test(clean) && !isSpokenEcho(clean)) activateAssistant()
+        if (clean && matchesWake(clean, wake.variants) && !isSpokenEcho(clean)) activateAssistant()
         setInterim('')
         return
       }
-      if (WAKE_WORD_RE.test(clean) && !awakeRef.current) activateAssistant()
+      if (matchesWake(clean, wake.variants) && !awakeRef.current) activateAssistant()
       setInterim(clean)
     },
     onFinal: (text) => {
@@ -690,17 +772,23 @@ export default function Home() {
       if (!clean) return
       // Чёрное окно сразу после активации: доезжают хвосты чужого звука
       if (Date.now() < commandBlackoutUntilRef.current) return
-      const wakeHit = WAKE_WORD_RE.test(clean)
-      const command = clean.replace(WAKE_STRIP_RE, '').trim()
+      const wakeHit = matchesWake(clean, wake.variants)
+      const command = wakeHit
+        ? clean
+            .replace(wakeStripRe, ' ')
+            .replace(/\s+([,.!?;:—-])/g, '$1') // «ну , давай» → «ну, давай»
+            .replace(/^[\s,.!?;:—-]+|[\s,.!?;:—-]+$/g, '')
+            .trim()
+        : clean.trim()
       const audible = ttsSpeakingRef.current || musicPlayingRef.current
       const inGrace = Date.now() < echoMuteUntilRef.current
 
       // Щит от «разговора с самой собой»: пока Дария говорит/играет музыка
-      // или звук только-только стих — принимаем ТОЛЬКО имя «Дария».
+      // или звук только-только стих — принимаем ТОЛЬКО имя активации.
       // Всё остальное — её голос, текст песни или их хвосты
       if ((audible || inGrace) && !wakeHit) return
       if (wakeHit) {
-        // «Дария» во время её речи/музыки = перебивание; в тишине = активация.
+        // Имя во время её речи/музыки = перебивание; в тишине = активация.
         // Сначала — эхо-щит: не её ли это собственные слова
         if (isSpokenEcho(clean)) return
         activateAssistant()
@@ -766,7 +854,7 @@ export default function Home() {
       deactivateAssistant()
       return
     }
-    // Безрукой режим: слушаю постоянно, активируюсь по имени «Дария».
+    // Безрукой режим: слушаю постоянно, активируюсь по имени активации.
     // Тап по микрофону, пока я говорю — тоже перебивание
     setMicOn(true)
     window.localStorage.setItem(HANDS_FREE_KEY, '1')
@@ -907,7 +995,7 @@ export default function Home() {
 
   // Динамическая статус-строка под полем ввода (как на референсе)
   const statusLine = tts.speaking
-    ? 'Говорю… скажи «Дария», чтобы перебить'
+    ? `Говорю… скажи «${wake.label}», чтобы перебить`
     : awake
       ? interim
         ? `Слушаю: «${interim}»`
@@ -916,8 +1004,8 @@ export default function Home() {
         ? interim
           ? `Слушаю: «${interim}»`
           : music
-            ? '♪ Музыка на фоне · скажи «Дария» и команду'
-            : 'Слушаю… скажи «Дария» или просто начни говорить'
+            ? `♪ Музыка на фоне · скажи «${wake.label}» и команду`
+            : `Слушаю… скажи «${wake.label}»`
         : music
           ? musicPlayback === 'paused'
             ? '♪ Музыка на паузе'
@@ -954,7 +1042,7 @@ export default function Home() {
             title={
               micListening
                 ? 'Слушаю постоянно — нажми, чтобы остановить'
-                : 'Включи — я буду слушать постоянно, активация словом «Дария»'
+                : `Включи — я буду слушать постоянно, активация словом «${wake.label}»`
             }
             className="grid size-12 shrink-0 place-items-center rounded-2xl border border-white/10 bg-white/5 outline-none transition-all duration-200 hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-white/20 active:scale-95"
             style={{ boxShadow: `0 0 26px -10px ${accent}` }}
@@ -1108,7 +1196,7 @@ export default function Home() {
               title={
                 micListening
                   ? 'Слушаю постоянно — нажми, чтобы выключить'
-                  : 'Включить голосовую активацию: скажи «Дария» — и я слушаю'
+                  : `Включить голосовую активацию: скажи «${wake.label}» — и я слушаю`
               }
             >
               {micListening ? <Square className="size-4" /> : <Mic className="size-5" />}
@@ -1182,6 +1270,8 @@ export default function Home() {
         onOpenChange={setSettingsOpen}
         voiceId={ttsVoice}
         onVoiceChange={setVoice}
+        wakeWordId={wakeWordId}
+        onWakeChange={setWakeWord}
         voiceOn={voiceOn}
         onVoiceToggle={toggleVoice}
         searchOn={searchOn}

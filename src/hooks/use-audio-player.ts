@@ -16,7 +16,8 @@ export interface UseAudioPlayerOptions {
 
 /** Во сколько раз тише музыка, пока говорит Дария */
 const DUCK_FACTOR = 0.2
-/** Если поток не заиграл за это время — считаем его битым и листаем дальше */
+/** Сколько ждём: не заиграл за это время — битый поток, листаем дальше;
+ *  играет, но timeupdate замер на это время — поток заглох, листаем дальше */
 const START_WATCHDOG_MS = 12_000
 
 const clampVolume = (v: number) => Math.min(100, Math.max(0, Math.round(v)))
@@ -68,21 +69,50 @@ export function useAudioPlayer({ src, volume = 100, onEnded, onError }: UseAudio
     audioRef.current = audio
     applyVolume()
 
-    const onPlaying = () => setPlayback('playing')
-    const onPaused = () => setPlayback('paused')
     const fail = () => {
       if (dead) return
       dead = true
       setPlayback('idle')
       handlersRef.current.onError?.()
     }
+
+    /* Сторожевой таймер — двусторонний:
+     * · до первого «playing» — «поток не заиграл», листаем дальше;
+     * · после старта — «поток заглох»: на каждом тике timeupdate
+     *   перезаводим, перестал тикать (станция умерла) — через
+     *   START_WATCHDOG_MS считаем трек битым.
+     * Раньше таймер не выключался после старта и рубил ИГРАЮЩЕЕ радио
+     * на 12-й секунде — выглядело как «сама переключила станцию». */
+    let watchdog: ReturnType<typeof setTimeout> | null = null
+    const armWatchdog = () => {
+      if (watchdog) clearTimeout(watchdog)
+      watchdog = setTimeout(fail, START_WATCHDOG_MS)
+    }
+    const disarmWatchdog = () => {
+      if (watchdog) {
+        clearTimeout(watchdog)
+        watchdog = null
+      }
+    }
+
+    const onPlaying = () => {
+      armWatchdog() // теперь сторожим тишину, а не старт
+      setPlayback('playing')
+    }
+    const onPaused = () => {
+      disarmWatchdog() // пауза — не ошибка, сторож не должен убить трек
+      setPlayback('paused')
+    }
+    const onTimeUpdate = () => armWatchdog()
     const handleEnded = () => {
+      disarmWatchdog()
       if (dead) return
       setPlayback('idle')
       handlersRef.current.onEnded?.()
     }
     audio.addEventListener('playing', onPlaying)
     audio.addEventListener('pause', onPaused)
+    audio.addEventListener('timeupdate', onTimeUpdate)
     audio.addEventListener('ended', handleEnded)
     audio.addEventListener('error', fail)
 
@@ -92,13 +122,14 @@ export function useAudioPlayer({ src, volume = 100, onEnded, onError }: UseAudio
 
     // Страховка от «вечного»: поток подключился, но тишина (станция умерла,
     // прокси висит) — через таймаут считаем трек битым
-    const watchdog = setTimeout(fail, START_WATCHDOG_MS)
+    armWatchdog()
 
     return () => {
       dead = true
-      clearTimeout(watchdog)
+      disarmWatchdog()
       audio.removeEventListener('playing', onPlaying)
       audio.removeEventListener('pause', onPaused)
+      audio.removeEventListener('timeupdate', onTimeUpdate)
       audio.removeEventListener('ended', handleEnded)
       audio.removeEventListener('error', fail)
       audio.pause()
