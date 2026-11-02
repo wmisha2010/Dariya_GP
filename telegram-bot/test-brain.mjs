@@ -21,6 +21,7 @@ import {
   fixFalseGoogled,
   stripToolCallMarkup,
   withCityContext,
+  timeLookup,
 } from './src/brain.js'
 
 let passed = 0
@@ -308,6 +309,8 @@ console.log('── Погода: город и приоритет open-meteo �
   check('город: «в Нижнем Новгороде завтра»', extractWeatherCity('погода в Нижнем Новгороде завтра') === 'Нижнем Новгороде')
   check('город: без города → пусто', extractWeatherCity('какая погода') === '')
   check('город: «на улице» не город', extractWeatherCity('что на улице, холодно?') === '')
+  check('город: «А погода? Ачинске» (приклейка с «?»)', extractWeatherCity('А погода? Ачинске') === 'Ачинске')
+  check('город: «А погода? в Ачинске»', extractWeatherCity('А погода? в Ачинске') === 'Ачинске')
   check('кандидаты: «Красноярске» → «Красноярск»', cityCandidates('Красноярске').includes('Красноярск'))
   check('кандидаты: «Тюмени» → «Тюмень»', cityCandidates('Тюмени').includes('Тюмень'))
   check('кандидаты: «Москве» → «Москва»', cityCandidates('Москве').includes('Москва'))
@@ -335,6 +338,32 @@ console.log('── Погода: город и приоритет open-meteo �
     check('погода: выбрал крупный город', r[0]?.title.includes('Тестоград, Тестовая область'))
     check('погода: температура в сниппете', r[0]?.snippet.includes('-10°C'))
     check('погода: код 71 = снег', r[0]?.snippet.includes('небольшой снег'))
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+console.log('── Время в городе: часовой пояс из геокодера (v0.3.7) ──')
+{
+  const realFetch = globalThis.fetch
+  const geoFixture = {
+    results: [
+      { name: 'Ачинск', latitude: 56.27, longitude: 90.5, admin1: 'Красноярский край', population: 100000, timezone: 'Asia/Krasnoyarsk' },
+    ],
+  }
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (/geocoding-api\.open-meteo/.test(u)) return new Response(JSON.stringify(geoFixture), { status: 200 })
+    return new Response('blocked', { status: 500 })
+  }
+  try {
+    const r = await webSearch('посмотри в сети в Ачинске сколько время ' + Date.now())
+    check('время: источник geo-tz', r[0]?.engine === 'geo-tz')
+    check('время: часы в сниппете', /[0-9]{2}:[0-9]{2}/.test(r[0]?.snippet || ''))
+    check('время: пояс указан', (r[0]?.snippet || '').includes('Asia/Krasnoyarsk'))
+    check('время: разница с Москвой +4', (r[0]?.snippet || '').includes('разница с Москвой +4 ч'))
+    const t2 = await timeLookup('время в Тестограде ' + Date.now())
+    check('время: direct lookup тоже работает', /Время: Ачинск|Время: /.test(t2.title))
   } finally {
     globalThis.fetch = realFetch
   }
@@ -384,9 +413,9 @@ console.log('── Триггеры поиска: «посмотри в сет�
 console.log('── Погода без города: город из истории диалога ──')
 {
   check('«А погода?» + история про Ачинск → добавляем город',
-    withCityContext('А погода?', ['посмотри в сети в Ачинске сколько время']) === 'А погода? Ачинске')
+    withCityContext('А погода?', ['посмотри в сети в Ачинске сколько время']) === 'А погода? в Ачинске')
   check('город с именительного тоже подхватывается',
-    withCityContext('а погода?', ['Дария, какая погода в Красноярске сейчас']) === 'а погода? Красноярске')
+    withCityContext('а погода?', ['Дария, какая погода в Красноярске сейчас']) === 'а погода? в Красноярске')
   check('без истории — как было', withCityContext('А погода?', []) === 'А погода?')
   check('непогодная фраза не тронута',
     withCityContext('как дела?', ['какая погода в Ачинске']) === 'как дела?')

@@ -161,6 +161,9 @@ export function formatDate(tz = 'Europe/Moscow') {
 /** Явные команды поиска */
 const SEARCH_VERBS_RE = /(погугли|загугли|поищи|поищ|поиск\s+в\s+интернете|найди\s+(в\s+интернете|в\s+сети)|посмотри\s+в\s+(интернете|сети|гугле|яндексе)|глянь\s+в\s+(интернете|сети|гугле|яндексе))/i
 
+/** Запросы времени в городе, оба порядка слов: «сколько времени в Ачинске» и «в Ачинске сколько время» */
+const TIME_QUERY_RE = /(?:времени|время)(?:\s+[а-яё]+){0,3}\s+(?:в|во|на)\s+[а-яё]|(?:в|во|на)\s+[а-яё]+(?:\s+[а-яё]+){0,3}[\s,]*(?:времени|время)/i
+
 /** Темы, где без свежих данных нечего делать */
 const SEARCH_HINTS_RE = /погода|новост|курс [а-яё]|курс\b.*(доллар|евро|рубл|биткоин|юан)|доллар.*(подорожал|подешевел|курс)|биткоин|эфириум|крипт|кто победил|сч[её]т матча|счет матча|итог(ы)? матча|сколько (стоит|стоят)|стоимость|цена|цены на|дата выхода|когда выйдет|когда вышл[ао]|последн(ие|яя) (новост|серия|сезон|версия|релиз|обновлени)|свеж(ие|ая) новост|тренд|расписание|премьер[аы]|кто такой|кто такая|праздник|выходн|отмеча|какой сегодня|какое сегодня|какой сейчас|какое сейчас|какой (день|год|число)|что (сегодня|сейчас) (в россии|в мире|происходит)|(?:сколько\s+)?времени\s+в\s+[а-яё]|время\s+в\s+[а-яё]/i
 
@@ -168,7 +171,7 @@ const SEARCH_HINTS_RE = /погода|новост|курс [а-яё]|курс\b
 export function needsWebSearch(text) {
   const t = (text || '').toLowerCase()
   if (!t) return false
-  return SEARCH_VERBS_RE.test(t) || SEARCH_HINTS_RE.test(t)
+  return SEARCH_VERBS_RE.test(t) || SEARCH_HINTS_RE.test(t) || TIME_QUERY_RE.test(t)
 }
 
 /** Из команды убираем поисковые глаголы — остальное уходит в DuckDuckGo */
@@ -390,8 +393,14 @@ export function extractWeatherCity(q) {
     if (words.length) found.push(words.join(' '))
   }
   if (found.length) return found[found.length - 1]
-  const m2 = t.match(/погод[а-яё]*\s+([А-ЯЁ][а-яё\-]+)/)
-  return m2 ? m2[1] : ''
+  // «погода Ачинск» / «А погода? Ачинске» — город сразу после слова «погода» (пунктуацию пропускаем)
+  const m2 = t.match(/погод[а-яё]*[?!.,;:]*\s+([А-ЯЁ][а-яё\-]+)/)
+  if (m2) return m2[1]
+  // Страховка: последнее слово с заглавной буквы — обычно город («А погода? Ачинске»)
+  const words = t.replace(/[?!.,;:]+/g, ' ').trim().split(/\s+/).filter(Boolean)
+  const last = words[words.length - 1] || ''
+  if (last.length > 2 && /^[А-ЯЁ]/.test(last) && !CITY_STOPWORDS.has(last.toLowerCase())) return last
+  return ''
 }
 
 /** Текущая погода + прогноз через open-meteo (без ключей; город — через геокодер с расклонением) */
@@ -477,6 +486,42 @@ export async function weatherLookup(q) {
   }
 }
 
+/** «Сколько времени в Ачинске» / «время в Тюмени» — город через геокодер → его часовой пояс → точные часы */
+export async function timeLookup(q) {
+  const raw = extractWeatherCity(q)
+  if (!raw) throw new Error('город не указан')
+  const g = await geocodeCity(raw)
+  const tz = g.timezone || ''
+  if (!tz) throw new Error('часовой пояс не найден')
+  const now = new Date()
+  const time = new Intl.DateTimeFormat('ru-RU', { timeZone: tz, hour: '2-digit', minute: '2-digit' }).format(now)
+  const date = new Intl.DateTimeFormat('ru-RU', {
+    timeZone: tz, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+  }).format(now)
+  let diff = ''
+  try {
+    // Разница с Москвой в минутах (надёжнее по «времени суток», чем по часам)
+    const minutesIn = (z) => {
+      const s = new Intl.DateTimeFormat('en-GB', { timeZone: z, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(now)
+      const [h, m] = s.split(':').map(Number)
+      return h * 60 + m
+    }
+    let d = minutesIn(tz) - minutesIn('Europe/Moscow')
+    if (d <= -720) d += 1440
+    if (d > 720) d -= 1440
+    if (d !== 0) {
+      const abs = d % 60 === 0 ? String(Math.abs(d) / 60) : (Math.abs(d) / 60).toFixed(1).replace('.', ',')
+      diff = `, разница с Москвой ${d > 0 ? '+' : '-'}${abs} ч`
+    }
+  } catch { /* без разницы */ }
+  return {
+    title: `Время: ${g.name}`,
+    url: 'https://time.is/',
+    snippet: `Сейчас в городе ${g.name} ${time}, ${date} (пояс ${tz}${diff}). Точное время только что.`,
+    engine: 'geo-tz',
+  }
+}
+
 /** Бинг прячет настоящие ссылки за редиректами /ck/a?...&u=a1<base64> — раскодируем */
 function decodeBingHref(href) {
   const m = href.replace(/&amp;/g, '&').match(/[?&]u=a1([A-Za-z0-9_-]+)/)
@@ -515,6 +560,15 @@ export async function webSearch(query, opts = {}) {
       searchCache.set(key, { r: [w], t: Date.now() })
       return [w]
     } catch { /* метеослужба не ответила — обычный поиск */ }
+  }
+  // Время в городе — приоритет: часовой пояс из геокодера, а не поисковые сниппеты
+  if (TIME_QUERY_RE.test(q) && extractWeatherCity(q)) {
+    try {
+      const t = await timeLookup(q)
+      if (searchCache.size > 50) searchCache.clear()
+      searchCache.set(key, { r: [t], t: Date.now() })
+      return [t]
+    } catch { /* город/пояс не нашлись — обычный поиск */ }
   }
   // Курсы валют — приоритет: точные данные ЦБ РФ, если доступны
   if (CURRENCY_RE.test(q)) {
@@ -603,7 +657,7 @@ export function withCityContext(command, prevUserTexts = []) {
   if (!cmd || !WEATHER_RE.test(cmd) || extractWeatherCity(cmd)) return cmd
   for (let i = prevUserTexts.length - 1; i >= 0; i--) {
     const city = extractWeatherCity(prevUserTexts[i])
-    if (city) return `${cmd} ${city}`
+    if (city) return `${cmd} в ${city}` // «в» — чтобы extractWeatherCity увидел город и в склеенной фразе
   }
   return cmd
 }
