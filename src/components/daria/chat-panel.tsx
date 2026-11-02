@@ -1,6 +1,7 @@
 'use client'
 
-import { memo, useEffect, useRef } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { ArrowDown } from 'lucide-react'
 import type { ChatMessage } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
@@ -53,6 +54,11 @@ interface ChatPanelProps {
   emptyHint: string
 }
 
+/**
+ * Диалог в стиле мессенджера: новое сообщение прокручивает список вниз
+ * только если пользователь и так внизу; если листает историю — не дёргаем,
+ * а показываем плавающую кнопку «К новым».
+ */
 export const ChatPanel = memo(function ChatPanel({
   messages,
   streamingText,
@@ -61,41 +67,87 @@ export const ChatPanel = memo(function ChatPanel({
   emptyHint,
 }: ChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  const atBottomRef = useRef(true)
+  const prevCountRef = useRef(0)
+  const [atBottom, setAtBottom] = useState(true)
 
-  useEffect(() => {
+  const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    atBottomRef.current = near
+    setAtBottom((prev) => (prev === near ? prev : near))
+  }, [])
+
+  // Новое сообщение или загруженная история — скролл вниз (мгновенно для истории)
+  useEffect(() => {
+    const jump = messages.length - prevCountRef.current
+    prevCountRef.current = messages.length
+    if (!atBottomRef.current || messages.length === 0 || jump === 0) return
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTo({ top: el.scrollHeight, behavior: jump > 1 ? 'auto' : 'smooth' })
+  }, [messages.length])
+
+  // Стриминг: подтыкаем вниз без плавности — обновления приходят часто
+  useEffect(() => {
+    if (!atBottomRef.current || streamingText.length === 0) return
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTo({ top: el.scrollHeight })
+  }, [streamingText])
+
+  const scrollToBottom = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    atBottomRef.current = true
+    setAtBottom(true)
     el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-  }, [messages.length, streamingText])
+  }, [])
 
   const hasContent = messages.length > 0 || streamingText.length > 0
 
   return (
-    <div
-      ref={scrollRef}
-      className="h-full overflow-y-auto scroll-smooth px-4 py-4 daria-scrollbar"
-      aria-live="polite"
-    >
-      {!hasContent ? (
-        <div className="flex h-full min-h-40 flex-col items-center justify-center gap-2 text-center">
-          <span className="text-3xl">💬</span>
-          <p className="max-w-56 text-sm leading-relaxed text-white/35">{emptyHint}</p>
-        </div>
-      ) : (
-        <div className="flex flex-col gap-3">
-          {messages.map((message) => (
-            <MessageBubble
-              key={message.id}
-              role={message.role}
-              content={message.content}
-              accent={accent}
-              characterName={characterName}
-            />
-          ))}
-          {streamingText.length > 0 && (
-            <MessageBubble role="assistant" content={streamingText} accent={accent} characterName={characterName} streaming />
-          )}
-        </div>
+    <div className="relative h-full">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="h-full overflow-y-auto px-4 py-4 daria-scrollbar"
+        aria-live="polite"
+      >
+        {!hasContent ? (
+          <div className="flex h-full min-h-40 flex-col items-center justify-center gap-2 text-center">
+            <span className="text-3xl">💬</span>
+            <p className="max-w-56 text-sm leading-relaxed text-white/35">{emptyHint}</p>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {messages.map((message) => (
+              <MessageBubble
+                key={message.id}
+                role={message.role}
+                content={message.content}
+                accent={accent}
+                characterName={characterName}
+              />
+            ))}
+            {streamingText.length > 0 && (
+              <MessageBubble role="assistant" content={streamingText} accent={accent} characterName={characterName} streaming />
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Читаешь историю — всплывает кнопка возврата к свежим сообщениям */}
+      {!atBottom && hasContent && (
+        <button
+          onClick={scrollToBottom}
+          className="absolute bottom-3 right-4 flex items-center gap-1.5 rounded-full border border-white/10 bg-[#0b1120]/90 px-3 py-2 text-xs text-white/70 shadow-lg backdrop-blur-md transition-all hover:border-white/20 hover:text-white"
+          aria-label="Прокрутить к новым сообщениям"
+        >
+          <ArrowDown className="size-3.5" />
+          К новым
+        </button>
       )}
     </div>
   )

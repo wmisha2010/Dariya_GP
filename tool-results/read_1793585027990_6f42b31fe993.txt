@@ -1,0 +1,731 @@
+     1→'use client'
+     2→
+     3→import { useCallback, useEffect, useRef, useState } from 'react'
+     4→import { Button } from '@/components/ui/button'
+     5→import { Textarea } from '@/components/ui/textarea'
+     6→import { useToast } from '@/hooks/use-toast'
+     7→import { useSpeechRecognition } from '@/hooks/use-speech-recognition'
+     8→import { useTtsQueue } from '@/hooks/use-tts-queue'
+     9→import { ChatPanel } from '@/components/daria/chat-panel'
+    10→import { MemoryDialog } from '@/components/daria/memory-dialog'
+    11→import { MusicPlayer } from '@/components/daria/music-player'
+    12→import { VoiceOrb } from '@/components/daria/voice-orb'
+    13→import { cn } from '@/lib/utils'
+    14→import type { AssistantState, Character, ChatMessage } from '@/lib/types'
+    15→import {
+    16→  AudioLines,
+    17→  Brain,
+    18→  Globe,
+    19→  Mic,
+    20→  MicOff,
+    21→  PanelRightClose,
+    22→  PanelRightOpen,
+    23→  SendHorizontal,
+    24→  Sparkles,
+    25→  Square,
+    26→  Trash2,
+    27→  Volume2,
+    28→  VolumeX,
+    29→} from 'lucide-react'
+    30→
+    31→const QUICK_PROMPTS = [
+    32→  'Расскажи, что ты умеешь',
+    33→  'Подколи меня по-доброму',
+    34→  'Включи спокойную музыку',
+    35→]
+    36→
+    37→/** Доступные голоса ассистента — белый список в /api/tts, id совпадают */
+    38→const TTS_VOICES = [
+    39→  { id: 'svetlana', name: 'Светлана' },
+    40→  { id: 'irina', name: 'Ирина' },
+    41→] as const
+    42→
+    43→/** Ключ localStorage, где хранится выбор голоса */
+    44→const TTS_VOICE_STORAGE_KEY = 'daria-tts-voice'
+    45→
+    46→/** Пауза после конца озвучки, прежде чем снова включать микрофон (затухание эха) */
+    47→const ECHO_GRACE_MS = 700
+    48→
+    49→/** Голосовое управление музыкой: «включи/поставь/запусти …» */
+    50→const MUSIC_TRIGGER_RE = /^\s*(включи(?:те)?|поставь(?:те)?|запусти(?:те)?|сыграй(?:те)?|играй(?:те)?)\s+/i
+    51→/** «выключи/стоп …» — остановить плеер */
+    52→const MUSIC_STOP_RE = /^\s*(выключи(?:те)?|останови(?:те)?|стоп|хватит)\s*/i
+    53→/** В команде должна быть музыкальная тема — чтобы «включи свет» не запускал плеер */
+    54→const MUSIC_TOPIC_RE =
+    55→  /(песн|музык|трек|плейлист|композици|ремикс|альбом|рэп|\bрок|\bпоп|джаз|блюз|классическ|инструментальн|фортепиан|гитар|металл|электро|танцевальн|спокойн|грустн|весел|весёл|романтич|колыбельн|хит|клип|мелод|исполнител|расслаб|концентрац|фонов|звук\w*\s+природ|дожд)/i
+    56→
+    57→const STATUS_TEXT: Record<AssistantState, string> = {
+    58→  idle: 'Нажми микрофон или напиши сообщение',
+    59→  listening: 'Слушаю…',
+    60→  thinking: 'Думаю…',
+    61→  speaking: 'Говорю…',
+    62→}
+    63→
+    64→export default function Home() {
+    65→  const { toast } = useToast()
+    66→
+    67→  // Данные
+    68→  const [characters, setCharacters] = useState<Character[]>([])
+    69→  const [activeCharacter, setActiveCharacter] = useState<Character | null>(null)
+    70→  const [messages, setMessages] = useState<ChatMessage[]>([])
+    71→  const [streamingText, setStreamingText] = useState('')
+    72→
+    73→  // Настройки
+    74→  const [searchOn, setSearchOn] = useState(false)
+    75→  const [voiceOn, setVoiceOn] = useState(true)
+    76→  const [memoryOpen, setMemoryOpen] = useState(false)
+    77→  /** Панель диалога скрыта/показана */
+    78→  const [chatOpen, setChatOpen] = useState(true)
+    79→  /** Сейчас играет трек (YouTube-плеер смонтирован) */
+    80→  const [music, setMusic] = useState<{ videoId: string; title: string; url: string } | null>(null)
+    81→
+    82→  // Ввод
+    83→  const [inputValue, setInputValue] = useState('')
+    84→  const [interim, setInterim] = useState('')
+    85→  const [micListening, setMicListening] = useState(false)
+    86→  const [busy, setBusy] = useState(false)
+    87→
+    88→  const sendingRef = useRef(false)
+    89→  const voiceOnRef = useRef(voiceOn)
+    90→  voiceOnRef.current = voiceOn
+    91→  const searchOnRef = useRef(searchOn)
+    92→  searchOnRef.current = searchOn
+    93→  const textareaRef = useRef<HTMLTextAreaElement>(null)
+    94→
+    95→  // ─── Эхо-защита: микрофон не должен слышать голос самого ассистента ─────
+    96→  const [micDesired, setMicDesired] = useState(false) // пользователь включил микрофон
+    97→  const micDesiredRef = useRef(false)
+    98→  const ttsSpeakingRef = useRef(false)
+    99→  const musicPlayingRef = useRef(false)
+   100→  const wasSpeakingRef = useRef(false)
+   101→  const echoMuteUntilRef = useRef(0)
+   102→  const resumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+   103→  const lastBusyToastRef = useRef(0)
+   104→
+   105→  // ─── Озвучка: серверный нейроголос Edge (голос выбирается кнопкой «Голос») ─
+   106→  const [ttsVoice, setTtsVoice] = useState<string>('svetlana')
+   107→
+   108→  // Восстанавливаем выбранный голос с прошлого визита
+   109→  useEffect(() => {
+   110→    const saved = window.localStorage.getItem(TTS_VOICE_STORAGE_KEY)
+   111→    if (saved && TTS_VOICES.some((v) => v.id === saved)) setTtsVoice(saved)
+   112→  }, [])
+   113→
+   114→  /** Циклическое переключение голоса с сохранением выбора */
+   115→  const cycleVoice = useCallback(() => {
+   116→    setTtsVoice((prev) => {
+   117→      const idx = TTS_VOICES.findIndex((v) => v.id === prev)
+   118→      const next = TTS_VOICES[(idx + 1) % TTS_VOICES.length]
+   119→      window.localStorage.setItem(TTS_VOICE_STORAGE_KEY, next.id)
+   120→      return next.id
+   121→    })
+   122→  }, [])
+   123→
+   124→  const currentVoiceLabel =
+   125→    TTS_VOICES.find((v) => v.id === ttsVoice)?.name ?? TTS_VOICES[0].name
+   126→
+   127→  /** Браузер заблокировал автозапуск звука — объясняем, как включить */
+   128→  const handlePlaybackBlocked = useCallback(() => {
+   129→    toast({
+   130→      title: 'Браузер заблокировал звук',
+   131→      description: 'Коснись экрана в любом месте — и я продолжу говорить голосом.',
+   132→    })
+   133→  }, [toast])
+   134→
+   135→  const tts = useTtsQueue({ voiceId: ttsVoice, onPlaybackBlocked: handlePlaybackBlocked })
+   136→
+   137→  ttsSpeakingRef.current = tts.speaking
+   138→  musicPlayingRef.current = music !== null
+   139→  /** Всё услышанное во время озвучки/музыки и сразу после — эхо, а не речь пользователя */
+   140→  const isEcho = () =>
+   141→    ttsSpeakingRef.current || musicPlayingRef.current || Date.now() < echoMuteUntilRef.current
+   142→
+   143→  /** Локальный ответ без LLM: музыкальные команды отвечают мгновенно */
+   144→  const assistantLocalReply = useCallback(
+   145→    (content: string) => {
+   146→      setMessages((prev) => [
+   147→        ...prev,
+   148→        { id: `assistant-${Date.now()}`, role: 'assistant', content, createdAt: new Date().toISOString() },
+   149→      ])
+   150→      if (voiceOnRef.current) tts.speak(content)
+   151→    },
+   152→    [tts]
+   153→  )
+   154→
+   155→  // ─── Отправка сообщения ─────────────────────────────────────────────────
+   156→  const send = useCallback(
+   157→    async (rawText: string) => {
+   158→      const text = rawText.trim()
+   159→      if (!text || sendingRef.current || !activeCharacter) return
+   160→      sendingRef.current = true
+   161→      setBusy(true)
+   162→      setInputValue('')
+   163→      setInterim('')
+   164→      tts.stop()
+   165→
+   166→      const now = new Date().toISOString()
+   167→      const localId = `local-${Date.now()}`
+   168→      setMessages((prev) => [
+   169→        ...prev,
+   170→        { id: localId, role: 'user', content: text, createdAt: now },
+   171→      ])
+   172→
+   173→      try {
+   174→        // Голосовое управление музыкой: «выключи музыку» — гасим плеер без LLM
+   175→        if (MUSIC_STOP_RE.test(text) && MUSIC_TOPIC_RE.test(text)) {
+   176→          tts.stop()
+   177→          setMusic(null)
+   178→          assistantLocalReply('Хорошо, выключила музыку 🎧')
+   179→          return
+   180→        }
+   181→
+   182→        // Голосовое управление музыкой: «включи песню…» — ищем и играем
+   183→        if (MUSIC_TRIGGER_RE.test(text) && MUSIC_TOPIC_RE.test(text)) {
+   184→          const query =
+   185→            text
+   186→              .replace(MUSIC_TRIGGER_RE, '')
+   187→              .replace(/\s*пожалуйста\s*/gi, ' ')
+   188→              .trim()
+   189→              .slice(0, 120) || 'музыка'
+   190→          const res = await fetch('/api/music', {
+   191→            method: 'POST',
+   192→            headers: { 'Content-Type': 'application/json' },
+   193→            body: JSON.stringify({ query }),
+   194→          })
+   195→          if (!res.ok) throw new Error('nothing found')
+   196→          const json = (await res.json()) as { track?: { videoId: string; title: string; url: string } }
+   197→          if (!json.track) throw new Error('nothing found')
+   198→          tts.stop()
+   199→          setMusic({ videoId: json.track.videoId, title: json.track.title, url: json.track.url })
+   200→          assistantLocalReply(`Включаю «${json.track.title}» 🎵\n${json.track.url}`)
+   201→          return
+   202→        }
+   203→
+   204→        // Запрос к ассистенту с автоповтором: перегрузка API (429/503) обычно
+   205→        // проходит за секунды — молча ждём и пробуем снова; красная ошибка —
+   206→        // только если не помогло даже после трёх попыток
+   207→        let res: Response | null = null
+   208→        let lastErrorText = ''
+   209→        for (let attempt = 0; attempt < 3; attempt++) {
+   210→          const r = await fetch('/api/chat', {
+   211→            method: 'POST',
+   212→            headers: { 'Content-Type': 'application/json' },
+   213→            body: JSON.stringify({
+   214→              characterId: activeCharacter.id,
+   215→              message: text,
+   216→              search: searchOnRef.current,
+   217→            }),
+   218→          })
+   219→          if (r.ok && r.body) {
+   220→            res = r
+   221→            break
+   222→          }
+   223→          const payload = (await r.json().catch(() => null)) as { error?: string } | null
+   224→          lastErrorText = payload?.error ?? `Ошибка ${r.status}`
+   225→          const retryable = r.status === 429 || r.status === 503 || r.status >= 500
+   226→          if (!retryable || attempt === 2) break
+   227→          if (attempt === 0) toast({ title: 'Модель притормозила — пробую ещё раз…' })
+   228→          await new Promise((resolve) => setTimeout(resolve, 3500 * (attempt + 1)))
+   229→        }
+   230→        if (!res || !res.body) {
+   231→          throw new Error(lastErrorText || 'Ассистент не смог ответить')
+   232→        }
+   233→
+   234→        const reader = res.body.getReader()
+   235→        const decoder = new TextDecoder()
+   236→        let full = ''
+   237→
+   238→        while (true) {
+   239→          const { done, value } = await reader.read()
+   240→          if (done) break
+   241→          const delta = decoder.decode(value, { stream: true })
+   242→          if (!delta) continue
+   243→          full += delta
+   244→          setStreamingText(full)
+   245→          if (voiceOnRef.current) tts.enqueue(delta)
+   246→        }
+   247→        if (voiceOnRef.current) tts.endStream()
+   248→
+   249→        setStreamingText('')
+   250→        if (!full.trim()) {
+   251→          // Пустой ответ — не тишина, а понятное сообщение
+   252→          throw new Error('Ассистент не успел ответить — попробуй ещё раз')
+   253→        }
+   254→        setMessages((prev) => [
+   255→          ...prev,
+   256→          {
+   257→            id: `assistant-${Date.now()}`,
+   258→            role: 'assistant',
+   259→            content: full.trim(),
+   260→            createdAt: new Date().toISOString(),
+   261→          },
+   262→        ])
+   263→      } catch (error) {
+   264→        setStreamingText('')
+   265→        toast({
+   266→          title: 'Не получилось',
+   267→          description: error instanceof Error ? error.message : 'Ассистент не смог ответить',
+   268→          variant: 'destructive',
+   269→        })
+   270→      } finally {
+   271→        sendingRef.current = false
+   272→        setBusy(false)
+   273→      }
+   274→    },
+   275→    [activeCharacter, assistantLocalReply, toast, tts]
+   276→  )
+   277→
+   278→  // ─── Микрофон ───────────────────────────────────────────────────────────
+   279→  const recognition = useSpeechRecognition({
+   280→    onInterim: (text) => {
+   281→      if (isEcho()) return
+   282→      setInterim(text)
+   283→    },
+   284→    onFinal: (text) => {
+   285→      if (isEcho()) return
+   286→      const clean = text.trim()
+   287→      if (!clean) return
+   288→      if (sendingRef.current) {
+   289→        // Ассистент ещё отвечает — не теряем молча, а подсказываем
+   290→        if (Date.now() - lastBusyToastRef.current > 4000) {
+   291→          lastBusyToastRef.current = Date.now()
+   292→          toast({ title: 'Секунду…', description: 'Ассистент ещё отвечает — повтори сразу после' })
+   293→        }
+   294→        return
+   295→      }
+   296→      void send(clean)
+   297→    },
+   298→    onError: (code) => {
+   299→      toast({
+   300→        title: 'Микрофон недоступен',
+   301→        description:
+   302→          code === 'not-allowed' || code === 'service-not-allowed'
+   303→            ? 'Разреши доступ к микрофону в настройках браузера'
+   304→            : `Ошибка распознавания: ${code}`,
+   305→        variant: 'destructive',
+   306→      })
+   307→    },
+   308→  })
+   309→
+   310→  const setMicOn = useCallback((on: boolean) => {
+   311→    micDesiredRef.current = on
+   312→    setMicDesired(on)
+   313→  }, [])
+   314→
+   315→  const toggleMic = useCallback(() => {
+   316→    if (!recognition.supported) {
+   317→      toast({
+   318→        title: 'Голосовой ввод недоступен',
+   319→        description: 'Открой приложение в Chrome или Edge — там работает распознавание речи',
+   320→        variant: 'destructive',
+   321→      })
+   322→      return
+   323→    }
+   324→    if (recognition.listening) {
+   325→      setMicOn(false)
+   326→      recognition.stop()
+   327→      setInterim('')
+   328→      return
+   329→    }
+   330→    // Перебивание: глушим ассистента и музыку, слушаем
+   331→    setMicOn(true)
+   332→    tts.stop()
+   333→    setMusic(null)
+   334→    recognition.start()
+   335→  }, [recognition, setMicOn, toast, tts])
+   336→
+   337→  useEffect(() => {
+   338→    setMicListening(recognition.listening)
+   339→  }, [recognition.listening])
+   340→
+   341→  // Пока звучит голос ассистента или музыка — приглушаем микрофон (он не слышит
+   342→  // сам себя), после тишины возвращаем с паузой на затухание звука
+   343→  const audible = tts.speaking || music !== null
+   344→  useEffect(() => {
+   345→    if (audible && !wasSpeakingRef.current) {
+   346→      wasSpeakingRef.current = true
+   347→      if (resumeTimerRef.current) {
+   348→        clearTimeout(resumeTimerRef.current)
+   349→        resumeTimerRef.current = null
+   350→      }
+   351→      recognition.pause()
+   352→    } else if (!audible && wasSpeakingRef.current) {
+   353→      wasSpeakingRef.current = false
+   354→      echoMuteUntilRef.current = Date.now() + ECHO_GRACE_MS
+   355→      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current)
+   356→      resumeTimerRef.current = setTimeout(() => {
+   357→        resumeTimerRef.current = null
+   358→        if (micDesiredRef.current) recognition.resume()
+   359→      }, ECHO_GRACE_MS)
+   360→    }
+   361→  }, [audible, recognition.pause, recognition.resume])
+   362→
+   363→  useEffect(
+   364→    () => () => {
+   365→      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current)
+   366→    },
+   367→    []
+   368→  )
+   369→
+   370→  // ─── Состояние ассистента для орбиса ────────────────────────────────────
+   371→  const assistantState: AssistantState = micListening
+   372→    ? 'listening'
+   373→    : tts.speaking || music !== null
+   374→      ? 'speaking'
+   375→      : busy
+   376→        ? 'thinking'
+   377→        : 'idle'
+   378→
+   379→  // ─── Загрузка персонажей и истории ──────────────────────────────────────
+   380→  const loadHistory = useCallback(async (characterId: string) => {
+   381→    try {
+   382→      const res = await fetch(`/api/messages?characterId=${encodeURIComponent(characterId)}`)
+   383→      const json = await res.json()
+   384→      setMessages(json.messages ?? [])
+   385→    } catch {
+   386→      setMessages([])
+   387→    }
+   388→  }, [])
+   389→
+   390→  useEffect(() => {
+   391→    let cancelled = false
+   392→    ;(async () => {
+   393→      try {
+   394→        const res = await fetch('/api/characters')
+   395→        const json = await res.json()
+   396→        const list: Character[] = json.characters ?? []
+   397→        if (cancelled) return
+   398→        setCharacters(list)
+   399→        const first = list.find((c) => c.isDefault) ?? list[0] ?? null
+   400→        if (first) {
+   401→          setActiveCharacter(first)
+   402→          await loadHistory(first.id)
+   403→        }
+   404→      } catch {
+   405→        if (!cancelled) {
+   406→          toast({
+   407→            title: 'Ошибка загрузки',
+   408→            description: 'Не удалось загрузить персонажей',
+   409→            variant: 'destructive',
+   410→          })
+   411→        }
+   412→      }
+   413→    })()
+   414→    return () => {
+   415→      cancelled = true
+   416→    }
+   417→  }, [])
+   418→
+   419→  // ─── Очистить чат ───────────────────────────────────────────────────────
+   420→  const clearChat = useCallback(async () => {
+   421→    if (!activeCharacter) return
+   422→    tts.stop()
+   423→    setMusic(null)
+   424→    try {
+   425→      await fetch(`/api/messages?characterId=${encodeURIComponent(activeCharacter.id)}`, {
+   426→        method: 'DELETE',
+   427→      })
+   428→      setMessages([])
+   429→      toast({ title: 'История очищена', description: `${activeCharacter.name} всё ещё помнит факты о тебе` })
+   430→    } catch {
+   431→      toast({ title: 'Не удалось очистить историю', variant: 'destructive' })
+   432→    }
+   433→  }, [activeCharacter, toast, tts])
+   434→
+   435→  // ─── Быстрые действия ───────────────────────────────────────────────────
+   436→  const toggleVoice = () => {
+   437→    setVoiceOn((prev) => {
+   438→      if (prev) tts.stop()
+   439→      return !prev
+   440→    })
+   441→  }
+   442→
+   443→  const accent = activeCharacter?.accent ?? '#2dd4bf'
+   444→  const greeting = activeCharacter
+   445→    ? `${activeCharacter.emoji} Я ${activeCharacter.name} — ${activeCharacter.tagline.toLowerCase()}`
+   446→    : 'Загружаю ассистентов…'
+   447→
+   448→  const canSend = inputValue.trim().length > 0 && !busy
+   449→
+   450→  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+   451→    if (e.key === 'Enter' && !e.shiftKey) {
+   452→      e.preventDefault()
+   453→      if (canSend) void send(inputValue)
+   454→    }
+   455→  }
+   456→
+   457→  return (
+   458→    <div className="flex min-h-screen flex-col bg-[#070b12] text-white">
+   459→      {/* Фоновые свечения */}
+   460→      <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden="true">
+   461→        <div
+   462→          className="absolute -top-40 left-1/2 h-[500px] w-[800px] -translate-x-1/2 rounded-full opacity-20 blur-[120px] transition-colors duration-700"
+   463→          style={{ backgroundColor: accent }}
+   464→        />
+   465→        <div className="absolute bottom-0 right-0 h-[300px] w-[400px] rounded-full bg-teal-500/5 blur-[100px]" />
+   466→      </div>
+   467→
+   468→      {/* Шапка */}
+   469→      <header className="relative z-10 flex items-center justify-between gap-3 border-b border-white/5 px-4 py-3 sm:px-6">
+   470→        <div className="flex items-center gap-3">
+   471→          <div
+   472→            className="grid size-10 place-items-center rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md"
+   473→            style={{ boxShadow: `0 0 20px -8px ${accent}` }}
+   474→          >
+   475→            <Sparkles className="size-5" style={{ color: accent }} />
+   476→          </div>
+   477→          <div className="leading-tight">
+   478→            <h1 className="text-lg font-bold tracking-wide">ДАРИЯ</h1>
+   479→            <p className="text-[11px] text-white/40">голосовой ИИ-ассистент</p>
+   480→          </div>
+   481→        </div>
+   482→
+   483→        <div className="flex items-center gap-2">
+   484→          <button
+   485→            onClick={() => setChatOpen((v) => !v)}
+   486→            className={cn(
+   487→              'flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-all duration-200',
+   488→              chatOpen
+   489→                ? 'border-white/10 bg-white/[0.03] text-white/45 hover:border-white/20 hover:text-white/75'
+   490→                : 'border-teal-400/40 bg-teal-400/10 text-teal-300'
+   491→            )}
+   492→            title={chatOpen ? 'Скрыть диалог' : 'Показать диалог'}
+   493→            aria-pressed={!chatOpen}
+   494→          >
+   495→            {chatOpen ? (
+   496→              <PanelRightClose className="size-3.5" />
+   497→            ) : (
+   498→              <PanelRightOpen className="size-3.5" />
+   499→            )}
+   500→            <span className="hidden sm:inline">Диалог</span>
+   501→          </button>
+   502→        </div>
+   503→      </header>
+   504→
+   505→      {/* Основная область */}
+   506→      <main className="relative z-10 flex flex-1 flex-col gap-4 p-4 lg:flex-row lg:gap-6 lg:p-6">
+   507→        {/* HUD: орбис + ввод */}
+   508→        <section className="flex min-h-[62vh] flex-1 flex-col items-center justify-between gap-6 lg:min-h-0">
+   509→          {/* Орбис и статус */}
+   510→          <div className="flex flex-1 flex-col items-center justify-center gap-3">
+   511→            <VoiceOrb state={assistantState} accent={accent} size={300} />
+   512→
+   513→            <div className="flex flex-col items-center gap-1.5 text-center">
+   514→              <p className="text-sm font-medium text-white/85">
+   515→                {music
+   516→                  ? '♪ Музыка играет'
+   517→                  : assistantState === 'idle'
+   518→                    ? greeting
+   519→                    : STATUS_TEXT[assistantState]}
+   520→              </p>
+   521→              {interim ? (
+   522→                <p className="max-w-md text-sm italic text-white/45">«{interim}»</p>
+   523→              ) : (
+   524→                <p className="max-w-md text-xs text-white/30">{STATUS_TEXT[assistantState]}</p>
+   525→              )}
+   526→              {/* Звук заблокирован autoplay-политикой — ждём первого касания */}
+   527→              {tts.blocked && (
+   528→                <p
+   529→                  role="status"
+   530→                  className="animate-pulse rounded-full border border-amber-400/40 bg-amber-400/10 px-3.5 py-1.5 text-xs font-medium text-amber-300"
+   531→                >
+   532→                  Коснись экрана — включу голос
+   533→                </p>
+   534→              )}
+   535→            </div>
+   536→
+   537→            {/* Быстрые подсказки — когда ассистент в покое (не зависят от истории чата) */}
+   538→            {assistantState === 'idle' && (
+   539→              <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+   540→                {QUICK_PROMPTS.map((prompt) => (
+   541→                  <button
+   542→                    key={prompt}
+   543→                    onClick={() => void send(prompt)}
+   544→                    className="rounded-full border border-white/10 bg-white/5 px-3.5 py-1.5 text-xs text-white/60 transition-all hover:border-white/20 hover:bg-white/10 hover:text-white/90"
+   545→                  >
+   546→                    {prompt}
+   547→                  </button>
+   548→                ))}
+   549→              </div>
+   550→            )}
+   551→          </div>
+   552→
+   553→          {/* Панель ввода */}
+   554→          <div className="w-full max-w-2xl">
+   555→            {/* Плеер: музыка играет даже при скрытом диалоге */}
+   556→            {music && (
+   557→              <div className="mb-2.5">
+   558→                <MusicPlayer
+   559→                  videoId={music.videoId}
+   560→                  title={music.title}
+   561→                  url={music.url}
+   562→                  accent={accent}
+   563→                  onClose={() => setMusic(null)}
+   564→                />
+   565→              </div>
+   566→            )}
+   567→
+   568→            {/* Переключатели */}
+   569→            <div className="mb-2.5 flex flex-wrap items-center justify-center gap-2">
+   570→              <ToggleChip
+   571→                active={searchOn}
+   572→                onClick={() => setSearchOn((v) => !v)}
+   573→                icon={<Globe className="size-3.5" />}
+   574→                label="Поиск в интернете"
+   575→              />
+   576→              <ToggleChip
+   577→                active={voiceOn}
+   578→                onClick={toggleVoice}
+   579→                icon={voiceOn ? <Volume2 className="size-3.5" /> : <VolumeX className="size-3.5" />}
+   580→                label="Озвучка ответов"
+   581→                title={`Озвучка ответов · Голос: ${tts.voiceName}`}
+   582→              />
+   583→              <button
+   584→                onClick={cycleVoice}
+   585→                title={`Голос ассистента: ${tts.voiceName}. Нажми, чтобы переключить на следующий`}
+   586→                aria-label="Сменить голос ассистента"
+   587→                className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs text-white/45 transition-all duration-200 hover:border-teal-400/40 hover:bg-teal-400/10 hover:text-teal-300"
+   588→              >
+   589→                <AudioLines className="size-3.5" />
+   590→                <span className="hidden sm:inline">Голос: {currentVoiceLabel}</span>
+   591→              </button>
+   592→              <ToggleChip
+   593→                active={memoryOpen}
+   594→                onClick={() => setMemoryOpen(true)}
+   595→                icon={<Brain className="size-3.5" />}
+   596→                label="Память и дневник"
+   597→              />
+   598→              <ToggleChip
+   599→                active={false}
+   600→                onClick={() => void clearChat()}
+   601→                icon={<Trash2 className="size-3.5" />}
+   602→                label="Очистить чат"
+   603→              />
+   604→            </div>
+   605→
+   606→            <div className="flex items-end gap-2 rounded-3xl border border-white/10 bg-white/[0.04] p-2 backdrop-blur-md">
+   607→              <button
+   608→                onClick={toggleMic}
+   609→                className={cn(
+   610→                  'grid size-11 shrink-0 place-items-center rounded-full transition-all duration-200',
+   611→                  micListening
+   612→                    ? 'animate-pulse bg-red-500/90 text-white shadow-[0_0_24px_-4px_rgba(239,68,68,0.7)]'
+   613→                    : 'text-white/60 hover:bg-white/10 hover:text-white'
+   614→                )}
+   615→                style={
+   616→                  micListening
+   617→                    ? undefined
+   618→                    : { boxShadow: `inset 0 0 0 1px rgba(255,255,255,0.08)` }
+   619→                }
+   620→                aria-label={micListening ? 'Остановить микрофон' : 'Говорить'}
+   621→                title={
+   622→                  micListening
+   623→                    ? 'Остановить'
+   624→                    : micDesired && (tts.speaking || music !== null)
+   625→                      ? 'Играет музыка или мой голос — кликни, чтобы перебить'
+   626→                      : 'Говорить голосом'
+   627→                }
+   628→              >
+   629→                {micListening ? (
+   630→                  <Square className="size-4" />
+   631→                ) : micDesired && (tts.speaking || music !== null) ? (
+   632→                  <MicOff className="size-5 opacity-50" />
+   633→                ) : (
+   634→                  <Mic className="size-5" />
+   635→                )}
+   636→              </button>
+   637→
+   638→              <Textarea
+   639→                ref={textareaRef}
+   640→                value={inputValue}
+   641→                onChange={(e) => setInputValue(e.target.value)}
+   642→                onKeyDown={handleKeyDown}
+   643→                placeholder={
+   644→                  recognition.supported
+   645→                    ? 'Напиши или скажи голосом…'
+   646→                    : 'Напиши сообщение… (голос работает в Chrome/Edge)'
+   647→                }
+   648→                rows={1}
+   649→                className="max-h-32 min-h-11 flex-1 resize-none border-0 bg-transparent py-2.5 text-sm text-white placeholder:text-white/30 focus-visible:ring-0 focus-visible:ring-offset-0"
+   650→              />
+   651→
+   652→              <Button
+   653→                onClick={() => void send(inputValue)}
+   654→                disabled={!canSend}
+   655→                size="icon"
+   656→                className="size-11 shrink-0 rounded-full text-black transition-opacity disabled:opacity-30"
+   657→                style={{ backgroundColor: accent }}
+   658→                aria-label="Отправить"
+   659→              >
+   660→                <SendHorizontal className="size-4" />
+   661→              </Button>
+   662→            </div>
+   663→
+   664→            <p className="mt-2 text-center text-[11px] text-white/25">
+   665→              Enter — отправить · Shift+Enter — новая строка · Клик по микрофону во время ответа — перебить
+   666→              <br />
+   667→              Скажи «включи песню…» или «спокойную музыку» — найду и заиграю · Микрофон притушён, пока я говорю или играет музыка
+   668→            </p>
+   669→          </div>
+   670→        </section>
+   671→
+   672→        {/* Чат — можно скрыть кнопкой «Диалог» в шапке */}
+   673→        {chatOpen && (
+   674→          <aside className="flex h-[46vh] w-full flex-col overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03] backdrop-blur-md lg:h-[calc(100vh-7.5rem)] lg:min-h-0 lg:w-[400px] lg:shrink-0">
+   675→            <div className="flex items-center justify-between border-b border-white/5 px-4 py-3">
+   676→              <div className="flex items-center gap-2">
+   677→                <span
+   678→                  className="size-2 rounded-full"
+   679→                  style={{ backgroundColor: accent, boxShadow: `0 0 8px ${accent}` }}
+   680→                />
+   681→                <h2 className="text-sm font-semibold">
+   682→                  Диалог с {activeCharacter?.name ?? '…'}
+   683→                </h2>
+   684→              </div>
+   685→              <span className="text-[11px] text-white/30">{messages.length} сообщений</span>
+   686→            </div>
+   687→            <div className="min-h-0 flex-1">
+   688→              <ChatPanel
+   689→                messages={messages}
+   690→                streamingText={streamingText}
+   691→                accent={accent}
+   692→                characterName={activeCharacter?.name ?? 'Ассистент'}
+   693→                emptyHint={`Начни разговор — ${activeCharacter?.name ?? 'ассистент'} услышит и запомнит важное о тебе`}
+   694→              />
+   695→            </div>
+   696→          </aside>
+   697→        )}
+   698→      </main>
+   699→
+   700→      <MemoryDialog open={memoryOpen} onOpenChange={setMemoryOpen} onMemoryChanged={() => {}} />
+   701→    </div>
+   702→  )
+   703→}
+   704→
+   705→interface ToggleChipProps {
+   706→  active: boolean
+   707→  onClick: () => void
+   708→  icon: React.ReactNode
+   709→  label: string
+   710→  title?: string
+   711→}
+   712→
+   713→function ToggleChip({ active, onClick, icon, label, title }: ToggleChipProps) {
+   714→  return (
+   715→    <button
+   716→      onClick={onClick}
+   717→      title={title}
+   718→      className={cn(
+   719→        'flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-all duration-200',
+   720→        active
+   721→          ? 'border-teal-400/40 bg-teal-400/10 text-teal-300'
+   722→          : 'border-white/10 bg-white/[0.03] text-white/45 hover:border-white/20 hover:text-white/75'
+   723→      )}
+   724→      aria-pressed={active}
+   725→    >
+   726→      {icon}
+   727→      <span className="hidden sm:inline">{label}</span>
+   728→    </button>
+   729→  )
+   730→}
+   731→
