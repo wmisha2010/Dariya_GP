@@ -17,6 +17,7 @@ import {
   formatSearchContext,
   webSearch,
   extractWeatherCity,
+  cityCandidates,
   fixFalseGoogled,
 } from './src/brain.js'
 
@@ -299,28 +300,39 @@ console.log('── Контекст поиска: честность ──')
   check('контекст: запрет выдумывать цифры', ctx.includes('ДОСЛОВНО'))
 }
 
-console.log('── Погода: город и приоритет wttr.in ──')
+console.log('── Погода: город и приоритет open-meteo ──')
 {
   check('город: «погода в Красноярске»', extractWeatherCity('какая погода в Красноярске') === 'Красноярске')
   check('город: «в Нижнем Новгороде завтра»', extractWeatherCity('погода в Нижнем Новгороде завтра') === 'Нижнем Новгороде')
   check('город: без города → пусто', extractWeatherCity('какая погода') === '')
   check('город: «на улице» не город', extractWeatherCity('что на улице, холодно?') === '')
+  check('кандидаты: «Красноярске» → «Красноярск»', cityCandidates('Красноярске').includes('Красноярск'))
+  check('кандидаты: «Тюмени» → «Тюмень»', cityCandidates('Тюмени').includes('Тюмень'))
+  check('кандидаты: «Москве» → «Москва»', cityCandidates('Москве').includes('Москва'))
 
   const realFetch = globalThis.fetch
-  const wttrFixture = {
-    current_condition: [{ temp_C: '-10', FeelsLikeC: '-15', weatherDesc: [{ value: 'Light snow' }], lang_ru: [{ value: 'Слабый снег' }], windspeedKmph: '8', humidity: '80' }],
-    weather: [{ mintempC: '-12', maxtempC: '-5' }],
-    nearest_area: [{ areaName: [{ value: 'Тестоград' }] }],
+  const geoFixture = {
+    results: [
+      { name: 'Тестоград', latitude: 55.1, longitude: 82.9, admin1: 'Тестовая область', population: 950000 },
+      { name: 'Тестоградка', latitude: 51, longitude: 80, admin1: 'Деревенский', population: 120 },
+    ],
+  }
+  const meteoFixture = {
+    current: { temperature_2m: -10.4, apparent_temperature: -15.3, relative_humidity_2m: 80, wind_speed_10m: 6, weather_code: 71 },
+    daily: { time: ['2026-11-02', '2026-11-03'], temperature_2m_min: [-12, -11], temperature_2m_max: [-5, -6] },
   }
   globalThis.fetch = async (url) => {
-    if (/wttr\.in/.test(String(url))) return new Response(JSON.stringify(wttrFixture), { status: 200 })
+    const u = String(url)
+    if (/geocoding-api\.open-meteo/.test(u)) return new Response(JSON.stringify(geoFixture), { status: 200 })
+    if (/api\.open-meteo/.test(u)) return new Response(JSON.stringify(meteoFixture), { status: 200 })
     return new Response('blocked', { status: 500 })
   }
   try {
     const r = await webSearch('какая погода в Тестограде ' + Date.now())
-    check('погода: источник wttr.in', r[0]?.engine === 'wttr.in')
+    check('погода: источник open-meteo', r[0]?.engine === 'open-meteo')
+    check('погода: выбрал крупный город', r[0]?.title.includes('Тестоград, Тестовая область'))
     check('погода: температура в сниппете', r[0]?.snippet.includes('-10°C'))
-    check('погода: русское описание', r[0]?.snippet.includes('слабый снег'))
+    check('погода: код 71 = снег', r[0]?.snippet.includes('небольшой снег'))
   } finally {
     globalThis.fetch = realFetch
   }

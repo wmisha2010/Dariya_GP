@@ -380,30 +380,86 @@ export function extractWeatherCity(q) {
   return m2 ? m2[1] : ''
 }
 
-/** Текущая погода + прогноз через wttr.in (без ключей, понимает русские названия) */
+/** Текущая погода + прогноз через open-meteo (без ключей; город — через геокодер с расклонением) */
+const WMO_RU = {
+  0: 'ясно', 1: 'преимущественно ясно', 2: 'переменная облачность', 3: 'облачно', 45: 'туман', 48: 'изморозь',
+  51: 'лёгкая морось', 53: 'морось', 55: 'сильная морось', 61: 'небольшой дождь', 63: 'дождь',
+  65: 'сильный дождь', 66: 'ледяной дождь', 71: 'небольшой снег', 73: 'снег', 75: 'сильный снег',
+  77: 'снежные зёрна', 80: 'небольшой ливень', 81: 'ливень', 82: 'сильный ливень', 85: 'небольшой снегопад',
+  86: 'сильный снегопад', 95: 'гроза', 96: 'гроза с градом', 99: 'сильная гроза с градом',
+}
+const DARIA_UA = { 'User-Agent': 'DariaBot/0.3 (personal assistant bot)' }
+
+/** Склонённый город → кандидаты в именительном: «Красноярске» → [«Красноярске», «Красноярск», «Красноярска»…] */
+export function cityCandidates(raw) {
+  const c = String(raw || '').trim()
+  if (!c) return []
+  const stem = c.slice(0, -1)
+  const last = c.slice(-1).toLowerCase()
+  const list = [c]
+  if (last === 'е') list.push(stem, stem + 'а', stem + 'о', stem + 'ь', stem + 'й')
+  else if (last === 'и') list.push(stem + 'я', stem + 'ь', stem + 'й', stem)
+  else if (last === 'у') list.push(stem + 'а', stem + 'ый', stem + 'ая')
+  else if (last === 'ю') list.push(stem + 'я', stem + 'а')
+  else if (last === 'а') list.push(stem + 'о')
+  else if (last === 'ы') list.push(stem + 'а', stem + 'ый')
+  return [...new Set(list)].slice(0, 6)
+}
+
+/** Геокодер open-meteo: перебираем формы города, выбираем самое населённое совпадение */
+async function geocodeCity(raw) {
+  const all = []
+  for (const name of cityCandidates(raw)) {
+    try {
+      const res = await fetch(
+        'https://geocoding-api.open-meteo.com/v1/search?name=' + encodeURIComponent(name) + '&count=10&language=ru&format=json',
+        { headers: DARIA_UA, signal: AbortSignal.timeout(6000) },
+      )
+      if (!res.ok) continue
+      const d = await res.json()
+      const rs = d?.results || []
+      if (!rs.length) continue
+      all.push(...rs)
+      const exact = rs.find((r) => String(r.name).toLowerCase() === name.toLowerCase() && (r.population || 0) > 50000)
+      if (exact) return exact
+    } catch { /* следующий кандидат */ }
+  }
+  if (!all.length) throw new Error('город не найден: ' + raw)
+  return all.reduce((best, r) => ((r.population || 0) > (best.population || 0) ? r : best), all[0])
+}
+
+/** Погода сейчас (+ завтра по запросу) по координатам геокодера */
 export async function weatherLookup(q) {
-  const city = extractWeatherCity(q)
-  if (!city) throw new Error('город не указан')
-  const res = await fetch('https://wttr.in/' + encodeURIComponent(city) + '?format=j1&lang=ru', {
-    headers: { 'User-Agent': 'DariaBot/0.3 (personal assistant bot)' },
-    signal: AbortSignal.timeout(8000),
-  })
-  if (!res.ok) throw new Error('wttr ' + res.status)
+  const raw = extractWeatherCity(q)
+  if (!raw) throw new Error('город не указан')
+  const g = await geocodeCity(raw)
+  const meteoUrl =
+    'https://api.open-meteo.com/v1/forecast?latitude=' + g.latitude + '&longitude=' + g.longitude +
+    '&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code' +
+    '&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=2'
+  const res = await fetch(meteoUrl, { headers: DARIA_UA, signal: AbortSignal.timeout(7000) })
+  if (!res.ok) throw new Error('meteo ' + res.status)
   const d = await res.json()
-  const c = d?.current_condition?.[0]
-  if (!c) throw new Error('wttr пусто')
-  const desc = c.lang_ru?.[0]?.value || c.weatherDesc?.[0]?.value || 'без осадков'
-  const today = d?.weather?.[0]
-  const tomorrow = d?.weather?.[1]
-  const name = d?.nearest_area?.[0]?.areaName?.[0]?.value || city
-  const place = /завтра/i.test(q) && tomorrow ? `Завтра в городе ${city}: от ${tomorrow.mintempC}° до ${tomorrow.maxtempC}°` : null
-  const now = `Сейчас в городе ${city}: ${c.temp_C}°C (ощущается как ${c.FeelsLikeC}°C), ${desc.toLowerCase()}, ветер ${c.windspeedKmph} км/ч, влажность ${c.humidity}%`
-  const range = today ? `. Днём сегодня от ${today.mintempC}° до ${today.maxtempC}°` : ''
+  const c = d?.current
+  if (!c) throw new Error('meteo пусто')
+  const code = WMO_RU[c.weather_code] || 'пасмурно'
+  const place = g.admin1 ? ', ' + g.admin1 : ''
+  const now =
+    `Погода ${g.name}${place} — сейчас ${Math.round(c.temperature_2m)}°C` +
+    ` (ощущается как ${Math.round(c.apparent_temperature)}°C), ${code},` +
+    ` ветер ${Math.round(c.wind_speed_10m)} км/ч, влажность ${c.relative_humidity_2m}%`
+  const daily = d?.daily
+  let range = ''
+  if (daily?.time?.length) {
+    range = /завтра/i.test(q) && daily.time[1]
+      ? `. Завтра (${daily.time[1]}): от ${Math.round(daily.temperature_2m_min[1])}° до ${Math.round(daily.temperature_2m_max[1])}°`
+      : `. Сегодня: от ${Math.round(daily.temperature_2m_min[0])}° до ${Math.round(daily.temperature_2m_max[0])}°`
+  }
   return {
-    title: `Погода — ${name}`,
-    url: 'https://wttr.in/' + encodeURIComponent(city),
-    snippet: (place ? place + '. ' : '') + now + range + '. Данные wttr.in только что.',
-    engine: 'wttr.in',
+    title: `Погода: ${g.name}${place}`,
+    url: 'https://open-meteo.com/',
+    snippet: now + range + '. Данные метеослужбы только что.',
+    engine: 'open-meteo',
   }
 }
 
@@ -437,14 +493,14 @@ export async function webSearch(query, opts = {}) {
   const key = q.toLowerCase()
   const cached = searchCache.get(key)
   if (cached && Date.now() - cached.t < SEARCH_CACHE_TTL) return cached.r
-  // Погода — приоритет: точные данные wttr.in, если в запросе есть город
+  // Погода — приоритет: точные данные open-meteo, если в запросе есть город
   if (WEATHER_RE.test(q) && extractWeatherCity(q)) {
     try {
       const w = await weatherLookup(q)
       if (searchCache.size > 50) searchCache.clear()
       searchCache.set(key, { r: [w], t: Date.now() })
       return [w]
-    } catch { /* wttr не ответил — обычный поиск */ }
+    } catch { /* метеослужба не ответила — обычный поиск */ }
   }
   // Курсы валют — приоритет: точные данные ЦБ РФ, если доступны
   if (CURRENCY_RE.test(q)) {
