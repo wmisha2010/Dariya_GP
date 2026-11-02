@@ -42,7 +42,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.12 (brain v3.1)'
+const VERSION = 'v0.3.13 (brain v3.1)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -196,7 +196,7 @@ async function handleStatus(env: Env): Promise<Response> {
     env.GEMINI_API_KEY
       ? `<p>Мозг: подключён ✅ <small>(Gemini${env.GEMINI_MODEL ? ': ' + env.GEMINI_MODEL : ''}${env.OPENROUTER_API_KEY ? ' + запасной OpenRouter' : ''})</small></p>`
       : env.OPENROUTER_API_KEY
-        ? `<p>Мозг: подключён ✅ <small>(OpenRouter: ${env.OPENROUTER_MODEL || 'по умолчанию'}; добавьте GEMINI_API_KEY — будет умнее)</small></p>`
+        ? `<p>Мозг: подключён ✅ <small>(OpenRouter — основной мозг: ${env.OPENROUTER_MODEL || 'по умолчанию'})</small></p>`
         : '<p>Мозг: НЕ подключён 😴 — добавьте секрет GEMINI_API_KEY или OPENROUTER_API_KEY</p>',
     `<p>Веб-поиск: ${env.WEB_SEARCH === 'off' ? 'выключен 🚫' : 'включён 🌐 (5 движков + Википедия)'}</p>`,
     webhookInfo,
