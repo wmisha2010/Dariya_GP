@@ -873,3 +873,23 @@ HTML страниц — свежий (вместе с выключателем) 
 - Живые проверки из Cloudflare: время → geo-tz «Сейчас в городе Ачинск 20:53, понедельник,
   2 ноября 2026 г. (пояс Asia/Krasnoyarsk, разница с Москвой +4 ч)»; погода → open-meteo
   «Ачинск, сейчас -10°C (ощущается -15), облачно, ветер 11 км/ч». Тесты 126/126, tsc чисто.
+
+## 2026-11-02 — v0.3.8: ключ Gemini от хозяина — главный мозг
+- Хозяин прислал ключ Google Gemini (новый формат «AQ.…»). Проверка из песочницы:
+  HTTP 400 FAILED_PRECONDITION «User location is not supported» — ключ прошёл АВТОРИЗАЦИЮ
+  (иначе была бы API_KEY_INVALID), но песочница в Гонконге (47.57.x, HK), Gemini там закрыт.
+  Воркер на Cloudflare выходит из европейских коло (для Telegram-webhook — рядом с серверами
+  Telegram) — там регион поддерживается. Проверка боевым путём: /llm-test + живой чат.
+- askLLM перепашен: Gemini — ПЕРВЫЙ (сильнее бесплатных OpenRouter-моделей, не страдает
+  ложными tool-call'ами), OpenRouter — запасной. Цепочка имён Gemini: GEMINI_MODEL (env) →
+  gemini-3.8-flash → gemini-flash-latest → gemini-2.5-flash (404 по имени → следующее).
+  maxOutputTokens 500→2048: у thinking-моделей часть бюджета съедают размышления, с 500
+  ответ обрезался бы. Ошибки провайдеров больше не молчат: console.error '[gemini]/[openrouter]'
+  (видно в Worker Logs дашборда).
+- Новый эндпоинт GET /llm-test (защита — SEARCH_TEST_KEY, как у /search-test):
+  egress (ip/city/country + colo из cf-ray), жив ли GEMINI_API_KEY (список моделей),
+  по ?text= — полный прогон askLLM. Статус-страница показывает оба мозга.
+- Секрет ставит хозяин: Dashboard → daria-bot → Settings → Variables and Secrets →
+  GEMINI_API_KEY. Из песочницы ставить нечем (wrangler не залогинен).
+- Тесты 134/134 (мок-fetch: порядок провайдеров, цепочка моделей, tool-call → запасной,
+  без ключей → null), tsc чисто, dry-run ок.
