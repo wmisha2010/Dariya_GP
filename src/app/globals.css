@@ -126,3 +126,15 @@
 .daria-scrollbar::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.22);
 }
+
+/* Волна голосового ввода (WaveBars): столбики дышат через scaleY.
+ * Амплитуда задаётся кастомными свойствами --wave-lo/--wave-hi на каждом столбике */
+@keyframes daria-wave {
+  0%,
+  100% {
+    transform: scaleY(var(--wave-lo, 0.25));
+  }
+  50% {
+    transform: scaleY(var(--wave-hi, 1));
+  }
+}

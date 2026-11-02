@@ -9,7 +9,9 @@ import { useTtsQueue } from '@/hooks/use-tts-queue'
 import { ChatPanel } from '@/components/daria/chat-panel'
 import { MemoryDialog } from '@/components/daria/memory-dialog'
 import { MusicPlayer } from '@/components/daria/music-player'
+import { SettingsDialog } from '@/components/daria/settings-dialog'
 import { VoiceOrb } from '@/components/daria/voice-orb'
+import { WaveBars } from '@/components/daria/wave-bars'
 import { cn } from '@/lib/utils'
 import type { AssistantState, Character, ChatMessage } from '@/lib/types'
 import {
@@ -17,20 +19,14 @@ import {
   Brain,
   Globe,
   Mic,
-  MicOff,
   SendHorizontal,
-  Sparkles,
+  Settings,
+  SlidersHorizontal,
   Square,
   Trash2,
   Volume2,
   VolumeX,
 } from 'lucide-react'
-
-const QUICK_PROMPTS = [
-  'Расскажи, что ты умеешь',
-  'Подколи меня по-доброму',
-  'Включи спокойную музыку',
-]
 
 /** Доступные голоса ассистента — белый список в /api/tts, id совпадают */
 const TTS_VOICES = [
@@ -52,13 +48,6 @@ const MUSIC_STOP_RE = /^\s*(выключи(?:те)?|останови(?:те)?|с
 const MUSIC_TOPIC_RE =
   /(песн|музык|трек|плейлист|композици|ремикс|альбом|рэп|\bрок|\bпоп|джаз|блюз|классическ|инструментальн|фортепиан|гитар|металл|электро|танцевальн|спокойн|грустн|весел|весёл|романтич|колыбельн|хит|клип|мелод|исполнител|расслаб|концентрац|фонов|звук\w*\s+природ|дожд)/i
 
-const STATUS_TEXT: Record<AssistantState, string> = {
-  idle: 'Нажми на голограмму или напиши сообщение',
-  listening: 'Слушаю…',
-  thinking: 'Думаю…',
-  speaking: 'Говорю…',
-}
-
 export default function Home() {
   const { toast } = useToast()
 
@@ -72,6 +61,9 @@ export default function Home() {
   const [searchOn, setSearchOn] = useState(false)
   const [voiceOn, setVoiceOn] = useState(true)
   const [memoryOpen, setMemoryOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  /** Раскрытый тулбар «Дополнительно» над строкой ввода */
+  const [toolsOpen, setToolsOpen] = useState(false)
   /** Сейчас играет трек (YouTube-плеер смонтирован) */
   const [music, setMusic] = useState<{ videoId: string; title: string; url: string } | null>(null)
 
@@ -105,6 +97,12 @@ export default function Home() {
   useEffect(() => {
     const saved = window.localStorage.getItem(TTS_VOICE_STORAGE_KEY)
     if (saved && TTS_VOICES.some((v) => v.id === saved)) setTtsVoice(saved)
+  }, [])
+
+  /** Выбор голоса из настроек с сохранением */
+  const setVoice = useCallback((id: string) => {
+    setTtsVoice(id)
+    window.localStorage.setItem(TTS_VOICE_STORAGE_KEY, id)
   }, [])
 
   /** Циклическое переключение голоса с сохранением выбора */
@@ -437,9 +435,19 @@ export default function Home() {
   }
 
   const accent = activeCharacter?.accent ?? '#2dd4bf'
-  const greeting = activeCharacter
-    ? `${activeCharacter.emoji} Я ${activeCharacter.name} — ${activeCharacter.tagline.toLowerCase()}`
-    : 'Загружаю ассистентов…'
+
+  // Динамическая статус-строка под полем ввода (как на референсе)
+  const statusLine = micListening
+    ? interim
+      ? `Слушаю: «${interim}»`
+      : 'Слушаю…'
+    : music
+      ? '♪ Музыка играет'
+      : tts.speaking
+        ? 'Говорю…'
+        : busy
+          ? 'Думаю…'
+          : 'Чат идёт потоком | Автоскролл'
 
   const canSend = inputValue.trim().length > 0 && !busy
 
@@ -451,47 +459,58 @@ export default function Home() {
   }
 
   return (
-    <div className="flex h-dvh flex-col overflow-hidden bg-[#070b12] text-white">
-      {/* Фоновые свечения */}
+    <div className="flex h-dvh flex-col overflow-hidden bg-[#0b0817] text-white">
+      {/* Фоновые свечения — тёмно-фиолетовый градиент как на референсе */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden="true">
-        <div
-          className="absolute -top-40 left-1/2 h-[500px] w-[800px] -translate-x-1/2 rounded-full opacity-20 blur-[120px] transition-colors duration-700"
-          style={{ backgroundColor: accent }}
-        />
-        <div className="absolute bottom-0 right-0 h-[300px] w-[400px] rounded-full bg-teal-500/5 blur-[100px]" />
+        <div className="absolute -top-44 left-1/3 h-[460px] w-[760px] -translate-x-1/2 rounded-full bg-indigo-600/15 blur-[130px]" />
+        <div className="absolute -bottom-48 -left-36 h-[480px] w-[580px] rounded-full bg-violet-700/15 blur-[120px]" />
+        <div className="absolute bottom-0 right-0 h-[300px] w-[400px] rounded-full bg-fuchsia-600/5 blur-[100px]" />
       </div>
 
-      {/* Шапка */}
-      <header className="relative z-10 flex items-center justify-between gap-3 border-b border-white/5 px-4 py-3 sm:px-6">
+      {/* Шапка: мини-голограмма, имя и настройки */}
+      <header className="relative z-10 flex items-center justify-between gap-3 border-b border-white/5 bg-[#0d0a1c]/70 px-4 py-2.5 backdrop-blur-md sm:px-6">
         <div className="flex items-center gap-3">
-          <div
-            className="grid size-10 place-items-center rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md"
-            style={{ boxShadow: `0 0 20px -8px ${accent}` }}
+          {/* Голограмма-орбис: тап — активировать микрофон, Дария слушает */}
+          <button
+            onClick={toggleMic}
+            aria-label={micListening ? 'Остановить микрофон' : 'Активировать голосового помощника'}
+            title={micListening ? 'Я уже слушаю — нажми, чтобы остановить' : 'Нажми на голограмму — я слушаю'}
+            className="grid size-12 shrink-0 place-items-center rounded-2xl border border-white/10 bg-white/5 outline-none transition-all duration-200 hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-white/20 active:scale-95"
+            style={{ boxShadow: `0 0 26px -10px ${accent}` }}
           >
-            <Sparkles className="size-5" style={{ color: accent }} />
-          </div>
+            <VoiceOrb state={assistantState} accent={accent} size={42} />
+          </button>
           <div className="leading-tight">
             <h1 className="text-lg font-bold tracking-wide">ДАРИЯ</h1>
             <p className="text-[11px] text-white/40">голосовой ИИ-ассистент</p>
           </div>
         </div>
+
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setSettingsOpen(true)}
+          className="gap-1.5 rounded-full border-white/15 bg-white/5 text-[11px] font-semibold uppercase tracking-wider text-white/80 hover:bg-white/10 hover:text-white"
+        >
+          <Settings className="size-4" />
+          Настройки
+        </Button>
       </header>
 
       {/* Основная область: диалог сверху, композер снизу */}
-      <main className="relative z-10 mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col px-4 pb-4 pt-4 sm:px-6">
+      <main className="relative z-10 mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col px-3 pt-2 sm:px-6">
         {/* Диалог — занимает верх и скроллится по мере заполнения */}
         <div className="min-h-0 flex-1">
           <ChatPanel
             messages={messages}
             streamingText={streamingText}
             accent={accent}
-            characterName={activeCharacter?.name ?? 'Ассистент'}
             emptyHint={`Начни разговор — ${activeCharacter?.name ?? 'ассистент'} услышит и запомнит важное о тебе`}
           />
         </div>
 
-        {/* Композер: плеер, голограмма, подсказки и строка ввода */}
-        <div className="shrink-0">
+        {/* Композер: плеер, тулбар «Дополнительно» и строка ввода */}
+        <div className="shrink-0 pb-2 pt-2">
           {/* Плеер: музыка играет даже во время переписки */}
           {music && (
             <div className="mb-2.5">
@@ -505,184 +524,195 @@ export default function Home() {
             </div>
           )}
 
-          {/* Голограмма: тап — активировать микрофон, Дария слушает */}
-          <div className="flex flex-col items-center justify-center gap-1.5 text-center sm:flex-row sm:gap-4 sm:text-left">
-            <button
-              onClick={toggleMic}
-              aria-label={micListening ? 'Остановить микрофон' : 'Активировать голосового помощника'}
-              title={micListening ? 'Я уже слушаю — нажми, чтобы остановить' : 'Нажми — я слушаю'}
-              className="grid shrink-0 place-items-center rounded-full outline-none transition-all duration-200 hover:bg-white/[0.04] focus-visible:ring-2 focus-visible:ring-white/20 active:scale-95"
+          {/* Звук заблокирован autoplay-политикой — ждём первого касания */}
+          {tts.blocked && (
+            <p
+              role="status"
+              className="mx-auto mb-2.5 w-fit animate-pulse rounded-full border border-amber-400/40 bg-amber-400/10 px-3.5 py-1.5 text-xs font-medium text-amber-300"
             >
-              <VoiceOrb state={assistantState} accent={accent} size={124} />
-            </button>
+              Коснись экрана — включу голос
+            </p>
+          )}
 
-            <div className="flex min-w-0 flex-col gap-1">
-              <p className="line-clamp-2 text-sm font-medium text-white/85 sm:truncate">
-                {music
-                  ? '♪ Музыка играет'
-                  : assistantState === 'idle'
-                    ? greeting
-                    : STATUS_TEXT[assistantState]}
-              </p>
-              {interim ? (
-                <p className="line-clamp-2 text-sm italic text-white/45">«{interim}»</p>
-              ) : (
-                <p className="line-clamp-2 text-xs text-white/30 sm:truncate">{STATUS_TEXT[assistantState]}</p>
-              )}
-              {/* Звук заблокирован autoplay-политикой — ждём первого касания */}
-              {tts.blocked && (
-                <p
-                  role="status"
-                  className="w-fit animate-pulse rounded-full border border-amber-400/40 bg-amber-400/10 px-3.5 py-1.5 text-xs font-medium text-amber-300"
-                >
-                  Коснись экрана — включу голос
-                </p>
-              )}
+          {/* Тулбар «Дополнительно»: раскрывается над строкой ввода */}
+          {toolsOpen && (
+            <div className="mx-auto mb-2.5 w-fit rounded-2xl border border-white/10 bg-[#151126]/95 px-2 py-2 shadow-xl backdrop-blur-md">
+              <div className="flex items-center gap-1">
+                <ToolButton
+                  icon={<Globe className="size-4" />}
+                  label="Поиск"
+                  active={searchOn}
+                  onClick={() => setSearchOn((v) => !v)}
+                />
+                <ToolButton
+                  icon={<AudioLines className="size-4" />}
+                  label={currentVoiceLabel}
+                  onClick={cycleVoice}
+                />
+                <ToolButton
+                  icon={voiceOn ? <Volume2 className="size-4" /> : <VolumeX className="size-4" />}
+                  label="Озвучка"
+                  active={voiceOn}
+                  onClick={toggleVoice}
+                />
+                <ToolButton
+                  icon={<Brain className="size-4" />}
+                  label="Память"
+                  onClick={() => {
+                    setToolsOpen(false)
+                    setMemoryOpen(true)
+                  }}
+                />
+                <ToolButton
+                  icon={<Trash2 className="size-4" />}
+                  label="Очистить"
+                  danger
+                  onClick={() => {
+                    setToolsOpen(false)
+                    void clearChat()
+                  }}
+                />
+              </div>
+              <p className="mt-1 text-center text-[10px] text-white/35">Дополнительно</p>
             </div>
-          </div>
+          )}
 
-          {/* Быстрые подсказки и переключатели — всегда над строкой ввода */}
-          <div className="mt-2.5 flex flex-wrap items-center justify-center gap-2">
-            {QUICK_PROMPTS.map((prompt) => (
-              <button
-                key={prompt}
-                onClick={() => void send(prompt)}
-                className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-white/60 transition-all hover:border-white/20 hover:bg-white/10 hover:text-white/90 sm:text-xs"
-              >
-                {prompt}
-              </button>
-            ))}
-            <ToggleChip
-              active={searchOn}
-              onClick={() => setSearchOn((v) => !v)}
-              icon={<Globe className="size-3.5" />}
-              label="Поиск в интернете"
-            />
-            <ToggleChip
-              active={voiceOn}
-              onClick={toggleVoice}
-              icon={voiceOn ? <Volume2 className="size-3.5" /> : <VolumeX className="size-3.5" />}
-              label="Озвучка ответов"
-              title={`Озвучка ответов · Голос: ${tts.voiceName}`}
-            />
-            <button
-              onClick={cycleVoice}
-              title={`Голос ассистента: ${tts.voiceName}. Нажми, чтобы переключить на следующий`}
-              aria-label="Сменить голос ассистента"
-              className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs text-white/45 transition-all duration-200 hover:border-teal-400/40 hover:bg-teal-400/10 hover:text-teal-300"
-            >
-              <AudioLines className="size-3.5" />
-              <span className="hidden sm:inline">Голос: {currentVoiceLabel}</span>
-            </button>
-            <ToggleChip
-              active={memoryOpen}
-              onClick={() => setMemoryOpen(true)}
-              icon={<Brain className="size-3.5" />}
-              label="Память и дневник"
-            />
-            <ToggleChip
-              active={false}
-              onClick={() => void clearChat()}
-              icon={<Trash2 className="size-3.5" />}
-              label="Очистить чат"
-            />
-          </div>
-
-          {/* Строка ввода */}
-          <div className="mt-2.5 flex items-end gap-2 rounded-3xl border border-white/10 bg-white/[0.04] p-2 backdrop-blur-md">
+          {/* Строка ввода: микрофон · волна/текст · дополнительно · отправить */}
+          <div
+            className="flex items-center gap-2 rounded-full border border-white/10 bg-[#151126]/90 p-1.5 backdrop-blur-md"
+            style={{ boxShadow: `0 10px 36px -18px ${accent}80` }}
+          >
+            {/* Микрофон: циановый круг, при записи — красный пульс */}
             <button
               onClick={toggleMic}
               className={cn(
-                'grid size-11 shrink-0 place-items-center rounded-full transition-all duration-200',
+                'grid size-11 shrink-0 place-items-center rounded-full text-white transition-all duration-200 active:scale-95',
                 micListening
-                  ? 'animate-pulse bg-red-500/90 text-white shadow-[0_0_24px_-4px_rgba(239,68,68,0.7)]'
-                  : 'text-white/60 hover:bg-white/10 hover:text-white'
+                  ? 'animate-pulse bg-red-500/90 shadow-[0_0_24px_-4px_rgba(239,68,68,0.7)]'
+                  : 'hover:brightness-110'
               )}
-              style={
-                micListening
-                  ? undefined
-                  : { boxShadow: `inset 0 0 0 1px rgba(255,255,255,0.08)` }
-              }
+              style={micListening ? undefined : { backgroundColor: accent }}
               aria-label={micListening ? 'Остановить микрофон' : 'Говорить'}
               title={
                 micListening
-                  ? 'Остановить'
+                  ? 'Остановить запись'
                   : micDesired && (tts.speaking || music !== null)
                     ? 'Играет музыка или мой голос — кликни, чтобы перебить'
                     : 'Говорить голосом'
               }
             >
-              {micListening ? (
-                <Square className="size-4" />
-              ) : micDesired && (tts.speaking || music !== null) ? (
-                <MicOff className="size-5 opacity-50" />
-              ) : (
-                <Mic className="size-5" />
-              )}
+              {micListening ? <Square className="size-4" /> : <Mic className="size-5" />}
             </button>
 
-            <Textarea
-              ref={textareaRef}
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={
-                recognition.supported
-                  ? 'Напиши или скажи голосом…'
-                  : 'Напиши сообщение… (голос работает в Chrome/Edge)'
-              }
-              rows={1}
-              className="max-h-32 min-h-11 flex-1 resize-none border-0 bg-transparent py-2.5 text-sm text-white placeholder:text-white/30 focus-visible:ring-0 focus-visible:ring-offset-0"
-            />
+            {/* Волна во время записи — тап по ней тоже останавливает */}
+            {micListening ? (
+              <button
+                onClick={toggleMic}
+                title="Нажми, чтобы остановить запись"
+                className="flex h-11 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-full px-2 outline-none focus-visible:ring-2 focus-visible:ring-white/20"
+              >
+                <WaveBars state="listening" className="max-w-full" />
+              </button>
+            ) : (
+              <Textarea
+                ref={textareaRef}
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={
+                  recognition.supported
+                    ? 'Напиши или скажи голосом…'
+                    : 'Напиши сообщение… (голос работает в Chrome/Edge)'
+                }
+                rows={1}
+                className="max-h-32 min-h-11 flex-1 resize-none border-0 bg-transparent px-2 py-2.5 text-sm text-white placeholder:text-white/30 focus-visible:ring-0 focus-visible:ring-offset-0"
+              />
+            )}
+
+            <button
+              onClick={() => setToolsOpen((v) => !v)}
+              aria-expanded={toolsOpen}
+              aria-label="Дополнительно"
+              title="Дополнительно"
+              className={cn(
+                'grid size-9 shrink-0 place-items-center rounded-full transition-colors',
+                toolsOpen ? 'bg-white/15 text-white' : 'text-white/50 hover:bg-white/10 hover:text-white'
+              )}
+            >
+              <SlidersHorizontal className="size-4" />
+            </button>
 
             <Button
               onClick={() => void send(inputValue)}
               disabled={!canSend}
               size="icon"
-              className="size-11 shrink-0 rounded-full text-black transition-opacity disabled:opacity-30"
-              style={{ backgroundColor: accent }}
+              className={cn(
+                'size-11 shrink-0 rounded-full border transition-all disabled:opacity-30',
+                canSend
+                  ? 'border-transparent text-black hover:brightness-110'
+                  : 'border-white/20 bg-transparent text-white/70 hover:bg-white/10'
+              )}
+              style={canSend ? { backgroundColor: accent } : undefined}
               aria-label="Отправить"
             >
               <SendHorizontal className="size-4" />
             </Button>
           </div>
 
-          <p className="mt-2 text-center text-[11px] text-white/25">
-            Enter — отправить · Shift+Enter — новая строка · Тап по голограмме — включить голос
-            <br />
-            Скажи «включи песню…» или «спокойную музыку» — найду и заиграю · Клик по микрофону во время ответа — перебить
+          {/* Статус: состояние ассистента / автоскролл */}
+          <p className="mt-2 text-center text-[11px] text-white/30" role="status">
+            {statusLine}
           </p>
         </div>
       </main>
 
       <MemoryDialog open={memoryOpen} onOpenChange={setMemoryOpen} onMemoryChanged={() => {}} />
+      <SettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        voiceId={ttsVoice}
+        onVoiceChange={setVoice}
+        voiceOn={voiceOn}
+        onVoiceToggle={toggleVoice}
+        searchOn={searchOn}
+        onSearchToggle={() => setSearchOn((v) => !v)}
+        onOpenMemory={() => {
+          setSettingsOpen(false)
+          setMemoryOpen(true)
+        }}
+        onClearChat={() => {
+          setSettingsOpen(false)
+          void clearChat()
+        }}
+      />
     </div>
   )
 }
 
-interface ToggleChipProps {
-  active: boolean
-  onClick: () => void
+interface ToolButtonProps {
   icon: React.ReactNode
   label: string
-  title?: string
+  onClick: () => void
+  active?: boolean
+  danger?: boolean
 }
 
-function ToggleChip({ active, onClick, icon, label, title }: ToggleChipProps) {
+/** Кнопка тулбара «Дополнительно»: иконка + подпись снизу */
+function ToolButton({ icon, label, onClick, active, danger }: ToolButtonProps) {
   return (
     <button
       onClick={onClick}
-      title={title}
       className={cn(
-        'flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-all duration-200',
-        active
-          ? 'border-teal-400/40 bg-teal-400/10 text-teal-300'
-          : 'border-white/10 bg-white/[0.03] text-white/45 hover:border-white/20 hover:text-white/75'
+        'flex w-[62px] flex-col items-center gap-1 rounded-xl px-1 py-2 text-[10px] transition-colors',
+        danger
+          ? 'text-white/55 hover:bg-red-400/10 hover:text-red-300'
+          : active
+            ? 'bg-teal-400/10 text-teal-300'
+            : 'text-white/55 hover:bg-white/10 hover:text-white'
       )}
-      aria-pressed={active}
     >
       {icon}
-      <span className="hidden sm:inline">{label}</span>
+      <span className="max-w-full truncate">{label}</span>
     </button>
   )
 }

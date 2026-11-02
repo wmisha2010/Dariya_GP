@@ -50,7 +50,6 @@ interface ChatPanelProps {
   messages: ChatMessage[]
   streamingText: string
   accent: string
-  characterName: string
   emptyHint: string
 }
 
@@ -63,7 +62,6 @@ export const ChatPanel = memo(function ChatPanel({
   messages,
   streamingText,
   accent,
-  characterName,
   emptyHint,
 }: ChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -128,11 +126,10 @@ export const ChatPanel = memo(function ChatPanel({
                 role={message.role}
                 content={message.content}
                 accent={accent}
-                characterName={characterName}
               />
             ))}
             {streamingText.length > 0 && (
-              <MessageBubble role="assistant" content={streamingText} accent={accent} characterName={characterName} streaming />
+              <MessageBubble role="assistant" content={streamingText} accent={accent} streaming />
             )}
           </div>
         )}
@@ -157,36 +154,31 @@ interface MessageBubbleProps {
   role: 'user' | 'assistant'
   content: string
   accent: string
-  characterName: string
   streaming?: boolean
 }
 
-function MessageBubble({ role, content, accent, characterName, streaming }: MessageBubbleProps) {
+function MessageBubble({ role, content, accent, streaming }: MessageBubbleProps) {
   const isUser = role === 'user'
+  // Мелкие free-модели иногда вставляют служебные теги вроде <arg_value> —
+  // в сообщении и в озвучке им не место
+  const safeContent = content.replace(/<\/?[a-zA-Z][a-zA-Z0-9_-]{0,24}>\s*/g, '')
   return (
     <div className={cn('flex w-full', isUser ? 'justify-end' : 'justify-start')}>
       <div
         className={cn(
-          'max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed',
+          'max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed shadow-sm',
           isUser
-            ? 'rounded-br-md bg-white/10 text-white/90'
-            : 'rounded-bl-md border border-white/5 bg-white/[0.04] text-white/85'
+            ? 'rounded-br-md bg-zinc-600/85 text-white'
+            : 'rounded-bl-md bg-white text-zinc-900'
         )}
-        style={
-          isUser
-            ? undefined
-            : { borderLeft: `2px solid ${accent}${streaming ? 'aa' : '55'}` }
-        }
       >
-        {!isUser && (
-          <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold" style={{ color: accent }}>
-            {streaming && (
-              <span className="inline-block size-1.5 animate-pulse rounded-full" style={{ backgroundColor: accent }} />
-            )}
-            {characterName}
-          </div>
+        <LinkifiedText text={safeContent} accent={accent} />
+        {streaming && (
+          <span
+            className="ml-1 inline-block size-1.5 animate-pulse rounded-full align-middle"
+            style={{ backgroundColor: accent }}
+          />
         )}
-        <LinkifiedText text={content} accent={accent} />
       </div>
     </div>
   )

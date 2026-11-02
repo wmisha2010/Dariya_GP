@@ -90,13 +90,15 @@ function detectEmotion(raw: string): Emotion {
   return 'neutral'
 }
 
-/** Чистим фразу от markdown, эмодзи и ссылок — в голос они не нужны */
+/** Чистим фразу от markdown, эмодзи, ссылок и служебных тегов моделей —
+ * в голос они не нужны */
 function cleanForSpeech(text: string): string {
   return text
     .replace(/`{3}[\s\S]*?`{3}/g, ' ')
     .replace(/`([^`]*)`/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/https?:\/\/\S+/g, 'ссылка')
+    .replace(/<\/?[a-zA-Z][a-zA-Z0-9_-]{0,24}>\s*/g, ' ')
     .replace(/[*_~#>|]+/g, '')
     .replace(EMOJI_RE, ' ')
     .replace(/\s+/g, ' ')

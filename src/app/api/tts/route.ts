@@ -50,12 +50,51 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 /** Отдельный сокет на голос: metadata привязана к voice при подключении,
  * поэтому переключение голоса не должно переиспользовать чужое соединение */
 const edgeTtsPromises = new Map<string, Promise<MsEdgeTTS>>()
+/** Когда сокет последний раз реально синтезировал звук */
+const edgeLastUsedAt = new Map<string, number>()
+/** Microsoft молча рвёт простаивающие WSS-соединения через несколько минут:
+ * запрос в мёртвый сокет висит без ответа и без ошибки. Если сокет простоял
+ * дольше лимита — не используем его, а пересоздаём заранее */
+const EDGE_SOCKET_IDLE_MS = 3 * 60_000
+/** Жёсткий потолок одной попытки синтеза: зависший стрим не должен блокировать
+ * озвучку дольше этого времени (встроенный лимит библиотеки слишком щедрый) */
+const EDGE_ATTEMPT_TIMEOUT_MS = 15_000
+
+function dropEdgeSocket(voice: string): void {
+  const promise = edgeTtsPromises.get(voice)
+  edgeTtsPromises.delete(voice)
+  edgeLastUsedAt.delete(voice)
+  if (promise) {
+    void promise
+      .then((tts) => {
+        try {
+          tts.close()
+        } catch {
+          /* сокет уже мёртв — не страшно */
+        }
+      })
+      .catch(() => {
+        /* инициализация не удалась — закрывать нечего */
+      })
+  }
+}
 
 async function getEdgeTts(voice: string): Promise<MsEdgeTTS> {
+  // Сокет простаивал слишком долго — Microsoft его уже закрыл. Строим новый,
+  // иначе первая фраза будет висеть до таймаута synthesis (десятки секунд)
+  const lastUsed = edgeLastUsedAt.get(voice) ?? 0
+  if (edgeTtsPromises.has(voice) && Date.now() - lastUsed > EDGE_SOCKET_IDLE_MS) {
+    dropEdgeSocket(voice)
+  }
+
   let promise = edgeTtsPromises.get(voice)
   if (!promise) {
     promise = (async () => {
-      const tts = new MsEdgeTTS()
+      const tts = new MsEdgeTTS({
+        // Короткие лимиты: мёртвое соединение не должно удерживать фразу
+        connectionTimeoutMs: 8_000,
+        synthesisTimeoutMs: 12_000,
+      })
       await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3)
       return tts
     })().catch((error) => {
@@ -74,8 +113,30 @@ async function fetchEdge(text: string, rate: number, pitch: number, voice: strin
     rate: `${rate >= 0 ? '+' : ''}${rate}%`,
     pitch: `${pitch >= 0 ? '+' : ''}${pitch}Hz`,
   })
+
+  edgeLastUsedAt.set(voice, Date.now())
   const chunks: Buffer[] = []
-  for await (const chunk of audioStream) chunks.push(Buffer.from(chunk))
+
+  // Watchdog: даже если ни библиотека, ни сокет не сообщили об ошибке,
+  // через EDGE_ATTEMPT_TIMEOUT_MS бросаем попытку сами и пересоздаём сокет
+  let watchdog: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<never>((_, reject) => {
+    watchdog = setTimeout(() => {
+      audioStream.destroy(new Error('Edge TTS: таймаут синтеза'))
+      reject(new Error('Edge TTS: таймаут синтеза'))
+    }, EDGE_ATTEMPT_TIMEOUT_MS)
+  })
+
+  try {
+    const collect = (async () => {
+      for await (const chunk of audioStream) chunks.push(Buffer.from(chunk))
+    })()
+    await Promise.race([collect, timedOut])
+  } finally {
+    if (watchdog) clearTimeout(watchdog)
+  }
+
+  edgeLastUsedAt.set(voice, Date.now())
   // Соединение не закрываем — переиспользуется между фразами;
   // при обрыве сокета tryEdge пересоздаст его и повторит попытку
   const buf = Buffer.concat(chunks)
@@ -94,7 +155,8 @@ async function tryEdge(text: string, rate: number, pitch: number, voice: string)
       return await fetchEdge(text, rate, pitch, voice)
     } catch (error) {
       lastError = error
-      edgeTtsPromises.delete(voice)
+      // Сокет, на котором случился сбой, дальше не используем — пересоздаём
+      dropEdgeSocket(voice)
       await sleep(200 * (attempt + 1))
     }
   }
