@@ -286,11 +286,11 @@ const SEARCH_UA =
 
 /** Движки поиска (запускаются параллельно, побеждает первый успешный) */
 const SEARCH_ENGINES = [
-  (q) => ({ url: 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), parse: parseDdgHtml }),
-  (q) => ({ url: 'https://lite.duckduckgo.com/lite/?q=' + encodeURIComponent(q), parse: parseDdgLiteHtml }),
-  (q) => ({ url: 'https://www.bing.com/search?q=' + encodeURIComponent(q) + '&setlang=ru&count=8', parse: parseBingHtml }),
-  (q) => ({ url: 'https://www.google.com/search?q=' + encodeURIComponent(q) + '&num=8&hl=ru', parse: parseGoogleHtml }),
-  (q) => ({ url: 'https://www.mojeek.com/search?q=' + encodeURIComponent(q), parse: parseMojeekHtml }),
+  ['ddg-html', (q) => ({ url: 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), parse: parseDdgHtml })],
+  ['ddg-lite', (q) => ({ url: 'https://lite.duckduckgo.com/lite/?q=' + encodeURIComponent(q), parse: parseDdgLiteHtml })],
+  ['bing', (q) => ({ url: 'https://www.bing.com/search?q=' + encodeURIComponent(q) + '&setlang=ru&count=8', parse: parseBingHtml })],
+  ['google', (q) => ({ url: 'https://www.google.com/search?q=' + encodeURIComponent(q) + '&num=8&hl=ru', parse: parseGoogleHtml })],
+  ['mojeek', (q) => ({ url: 'https://www.mojeek.com/search?q=' + encodeURIComponent(q), parse: parseMojeekHtml })],
 ]
 
 /** Парсер выдачи Mojeek (заголовки в h2) */
@@ -347,15 +347,15 @@ export async function webSearch(query, opts = {}) {
     'User-Agent': SEARCH_UA,
     'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
   }
-  const tasks = SEARCH_ENGINES.map(async (engine) => {
+  const tasks = SEARCH_ENGINES.map(([name, engine]) => (async () => {
     const { url, parse } = engine(q)
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(6000) })
     if (!res.ok) throw new Error('status ' + res.status)
     const results = parse(await res.text(), max)
     if (!results.length) throw new Error('пусто')
-    return results
-  })
-  tasks.push(wikipediaSearch(q, max))
+    return results.map((r) => ({ ...r, engine: name })) // метка победителя для диагностики
+  }))
+  tasks.push(wikipediaSearch(q, max).then((rs) => rs.map((r) => ({ ...r, engine: 'wikipedia' }))))
   let results = []
   try {
     results = await Promise.any(tasks)

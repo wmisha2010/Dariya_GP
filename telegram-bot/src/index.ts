@@ -33,6 +33,7 @@ export interface Env {
   TIMEZONE?: string
   WEB_APP_URL?: string
   WEB_SEARCH?: string
+  SEARCH_TEST_KEY?: string
 }
 
 const TG_API = 'https://api.telegram.org'
@@ -131,7 +132,7 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   while (history.length > HISTORY_MAX_TURNS * 2) history.shift()
   chatHistory.set(chatId, history)
 
-  // 2а) Свежие данные? Ходим в DuckDuckGo и подмешиваем выдачу в контекст
+  // 2а) Свежие данные? Гонка поисковых движков (DDG/Bing/Google/Mojeek/Википедия) → выдача в контекст LLM
   let webContext = ''
   if ((env.WEB_SEARCH || '') !== 'off' && needsWebSearch(command)) {
     try {
@@ -185,7 +186,7 @@ async function handleStatus(env: Env): Promise<Response> {
       : env.GEMINI_API_KEY
         ? '<p>Мозг: подключён ✅ <small>(Gemini)</small></p>'
         : '<p>Мозг: НЕ подключён 😴 — добавьте секрет OPENROUTER_API_KEY</p>',
-    `<p>Веб-поиск: ${env.WEB_SEARCH === 'off' ? 'выключен 🚫' : 'включён 🌐 (DuckDuckGo)'}</p>`,
+    `<p>Веб-поиск: ${env.WEB_SEARCH === 'off' ? 'выключен 🚫' : 'включён 🌐 (5 движков + Википедия)'}</p>`,
     webhookInfo,
     '<p>Setup: <code>/setup?bot_token=ТОКЕН</code></p>',
   ].join(''))
@@ -222,6 +223,27 @@ async function handleSetup(url: URL, env: Env): Promise<Response> {
   ].join(''))
 }
 
+async function handleSearchTest(url: URL, env: Env): Promise<Response> {
+  const json = (obj: any, status = 200) =>
+    new Response(JSON.stringify(obj, null, 2), {
+      status,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    })
+  if ((env.WEB_SEARCH || '') === 'off') return json({ ok: false, error: 'поиск выключен (WEB_SEARCH=off)' }, 409)
+  const key = env.SEARCH_TEST_KEY || ''
+  if (key && url.searchParams.get('key') !== key) return json({ ok: false, error: 'неверный key' }, 403)
+  const q = (url.searchParams.get('q') || '').trim()
+  if (!q) return json({ ok: false, error: 'укажите ?q=поисковый+запрос' }, 400)
+  const t0 = Date.now()
+  try {
+    const results = await webSearch(q)
+    const winner = results[0]?.engine || '—'
+    return json({ ok: true, query: q, count: results.length, winner, ms: Date.now() - t0, results })
+  } catch (e: any) {
+    return json({ ok: false, error: String(e?.message || e), ms: Date.now() - t0 }, 500)
+  }
+}
+
 async function handleWebhook(request: Request, env: Env): Promise<Response> {
   const token = env.TELEGRAM_BOT_TOKEN || ''
   if (!token) return new Response('no token', { status: 500 })
@@ -248,6 +270,7 @@ export default {
     const url = new URL(request.url)
     if (url.pathname === '/' && request.method === 'GET') return handleStatus(env)
     if (url.pathname === '/setup' && request.method === 'GET') return handleSetup(url, env)
+    if (url.pathname === '/search-test' && request.method === 'GET') return handleSearchTest(url, env)
     if (url.pathname === '/telegram-webhook' && request.method === 'POST') return handleWebhook(request, env)
     return new Response('not found', { status: 404 })
   },
