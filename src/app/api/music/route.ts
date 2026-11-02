@@ -27,7 +27,7 @@ function getZai() {
 }
 
 /** Кэш последних поисков: повторная команда не бьёт по сети */
-const searchCache = new Map<string, TrackResult | null>()
+const searchCache = new Map<string, TrackResult[]>()
 const CACHE_MAX = 60
 
 const VIDEO_ID_RE = /(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{11})/
@@ -104,28 +104,29 @@ async function fetchMeta(videoId: string): Promise<MetaResult> {
   }
 }
 
-async function findTrack(query: string): Promise<TrackResult | null> {
+/** Ищем не один трек, а очередь — чтобы работали «дальше» и автопереход */
+async function findTracks(query: string): Promise<TrackResult[]> {
   const [fromSearch, fromPage] = await Promise.all([
     searchByWebSearch(query),
     searchByYouTubePage(query),
   ])
-  const ids = [...new Set([...fromSearch, ...fromPage])]
+  const ids = [...new Set([...fromSearch, ...fromPage])].slice(0, 8)
 
-  for (const id of ids.slice(0, 5)) {
-    const meta = await fetchMeta(id)
-    if (meta === 'skip') continue
-    if (meta === null) {
-      // Проверить не удалось — берём как есть, хуже не станет
-      return { videoId: id, title: 'Трек с YouTube', author: '', url: `https://www.youtube.com/watch?v=${id}` }
-    }
-    return {
+  // Метаданные всех кандидатов параллельно — быстро отсеиваем запрещённые к embed
+  const metas = await Promise.all(ids.map(fetchMeta))
+  const tracks: TrackResult[] = []
+  for (let i = 0; i < ids.length && tracks.length < 6; i++) {
+    const id = ids[i]
+    const meta = metas[i]
+    if (meta === 'skip') continue // встраивание запрещено автором
+    tracks.push({
       videoId: id,
-      title: (meta.title ?? 'Трек с YouTube').slice(0, 120),
-      author: (meta.author_name ?? '').slice(0, 80),
+      title: (meta ? meta.title : undefined) ?? 'Трек с YouTube',
+      author: (meta ? meta.author_name : undefined) ?? '',
       url: `https://www.youtube.com/watch?v=${id}`,
-    }
+    })
   }
-  return null
+  return tracks
 }
 
 export async function POST(req: NextRequest) {
@@ -142,22 +143,23 @@ export async function POST(req: NextRequest) {
     const key = query.toLowerCase().slice(0, 120)
     const cached = searchCache.get(key)
     if (cached !== undefined) {
-      return Response.json(cached ? { track: cached } : { error: 'Ничего не нашлось' }, {
-        status: cached ? 200 : 404,
-      })
+      return Response.json(
+        cached.length ? { tracks: cached, track: cached[0] } : { error: 'Ничего не нашлось' },
+        { status: cached.length ? 200 : 404 }
+      )
     }
 
-    const track = await findTrack(query)
+    const tracks = await findTracks(query)
     if (searchCache.size >= CACHE_MAX) {
       const oldest = searchCache.keys().next().value
       if (oldest !== undefined) searchCache.delete(oldest)
     }
-    searchCache.set(key, track)
+    searchCache.set(key, tracks)
 
-    if (!track) {
+    if (!tracks.length) {
       return Response.json({ error: 'Ничего не нашлось' }, { status: 404 })
     }
-    return Response.json({ track })
+    return Response.json({ tracks, track: tracks[0] })
   } catch {
     return Response.json({ error: 'Поиск музыки не удался' }, { status: 502 })
   }
