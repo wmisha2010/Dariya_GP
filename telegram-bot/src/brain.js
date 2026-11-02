@@ -249,39 +249,122 @@ export function parseDdgLiteHtml(html, max = 5) {
   return out
 }
 
+/** Парсер выдачи Bing (блоки li.b_algo) */
+export function parseBingHtml(html, max = 5) {
+  const blocks = [...html.matchAll(/<li[^>]*class=["'][^"']*b_algo[^"']*["'][^>]*>([\s\S]*?)<\/li>/g)]
+  const out = []
+  for (const block of blocks) {
+    if (out.length >= max) break
+    const body = block[1]
+    const a = body.match(/<a[^>]*href=["'](https?:\/\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/i)
+    if (!a) continue
+    const title = stripTags(a[2])
+    if (!title) continue
+    const p = body.match(/<p[^>]*>([\s\S]*?)<\/p>/i)
+    out.push({ title, url: a[1], snippet: stripTags(p?.[1] || '') })
+  }
+  return out
+}
+
+/** Парсер выдачи Google (базовая HTML-версия, ссылки вида /url?q=…) */
+export function parseGoogleHtml(html, max = 5) {
+  const anchors = [...html.matchAll(/<a[^>]*href="\/url\?q=(https?:\/\/[^&"]+)[^"]*"[^>]*>([\s\S]*?)<\/a>/g)]
+  const out = []
+  for (const a of anchors) {
+    if (out.length >= max) break
+    const title = stripTags(a[2])
+    const url = a[1]
+    if (!title || !/^https?:\/\//.test(url)) continue
+    if (/google\.[a-z.]+\/|accounts\.google|youtube\.com\/results|gstatic/.test(url)) continue
+    out.push({ title, url, snippet: '' })
+  }
+  return out
+}
+
 const SEARCH_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
 
+/** Движки поиска (запускаются параллельно, побеждает первый успешный) */
+const SEARCH_ENGINES = [
+  (q) => ({ url: 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), parse: parseDdgHtml }),
+  (q) => ({ url: 'https://lite.duckduckgo.com/lite/?q=' + encodeURIComponent(q), parse: parseDdgLiteHtml }),
+  (q) => ({ url: 'https://www.bing.com/search?q=' + encodeURIComponent(q) + '&setlang=ru&count=8', parse: parseBingHtml }),
+  (q) => ({ url: 'https://www.google.com/search?q=' + encodeURIComponent(q) + '&num=8&hl=ru', parse: parseGoogleHtml }),
+  (q) => ({ url: 'https://www.mojeek.com/search?q=' + encodeURIComponent(q), parse: parseMojeekHtml }),
+]
+
+/** Парсер выдачи Mojeek (заголовки в h2) */
+export function parseMojeekHtml(html, max = 5) {
+  const anchors = [...html.matchAll(/<h2[^>]*>\s*<a[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
+  const out = []
+  for (const a of anchors) {
+    if (out.length >= max) break
+    const title = stripTags(a[2])
+    if (!title || /mojeek\.com/.test(a[1])) continue
+    out.push({ title, url: a[1], snippet: '' })
+  }
+  return out
+}
+
+/** Википедия — самый лояльный к ботам источник (для энциклопедических вопросов) */
+async function wikipediaSearch(q, max) {
+  const url =
+    'https://ru.wikipedia.org/w/api.php?action=query&list=search&srlimit=' + Math.min(max, 3) +
+    '&format=json&srsearch=' + encodeURIComponent(q)
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'DariaBot/0.3 (personal assistant bot)' },
+    signal: AbortSignal.timeout(6000),
+  })
+  if (!res.ok) throw new Error('wikipedia ' + res.status)
+  const data = await res.json()
+  const hits = data?.query?.search || []
+  const results = hits.map((h) => ({
+    title: `Википедия: ${h.title}`,
+    url: 'https://ru.wikipedia.org/wiki/' + encodeURIComponent(h.title.replace(/ /g, '_')),
+    snippet: stripTags(h.snippet || ''),
+  }))
+  if (!results.length) throw new Error('wikipedia пусто')
+  return results
+}
+
+/** Кэш выдачи: не ходим в поисковики дважды за 10 минут */
+const searchCache = new Map()
+const SEARCH_CACHE_TTL = 10 * 60 * 1000
+
 /**
- * Поиск в DuckDuckGo. Возвращает [{ title, url, snippet }] (до limit),
- * при любой неудаче — [] (LLM ответит из своих знаний).
+ * Поиск в интернете: все движки параллельно, побеждает первый успешный.
+ * Возвращает [{ title, url, snippet }] (до limit),
+ * при полной неудаче — [] (LLM ответит из своих знаний).
  */
 export async function webSearch(query, opts = {}) {
   const q = (query || '').trim()
   if (!q) return []
   const max = opts.limit || 5
+  const key = q.toLowerCase()
+  const cached = searchCache.get(key)
+  if (cached && Date.now() - cached.t < SEARCH_CACHE_TTL) return cached.r
   const headers = {
     'User-Agent': SEARCH_UA,
     'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
   }
+  const tasks = SEARCH_ENGINES.map(async (engine) => {
+    const { url, parse } = engine(q)
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(6000) })
+    if (!res.ok) throw new Error('status ' + res.status)
+    const results = parse(await res.text(), max)
+    if (!results.length) throw new Error('пусто')
+    return results
+  })
+  tasks.push(wikipediaSearch(q, max))
+  let results = []
   try {
-    const res = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), {
-      headers,
-      signal: AbortSignal.timeout(8000),
-    })
-    if (res.ok) {
-      const results = parseDdgHtml(await res.text(), max)
-      if (results.length) return results
-    }
-  } catch { /* пробуем lite */ }
-  try {
-    const res = await fetch('https://lite.duckduckgo.com/lite/?q=' + encodeURIComponent(q), {
-      headers,
-      signal: AbortSignal.timeout(8000),
-    })
-    if (res.ok) return parseDdgLiteHtml(await res.text(), max)
-  } catch { /* интернета сегодня не будет */ }
-  return []
+    results = await Promise.any(tasks)
+  } catch { /* все промолчали */ }
+  if (results.length) {
+    if (searchCache.size > 50) searchCache.clear()
+    searchCache.set(key, { r: results, t: Date.now() })
+  }
+  return results
 }
 
 /** Блок-контекст с результатами поиска для LLM */

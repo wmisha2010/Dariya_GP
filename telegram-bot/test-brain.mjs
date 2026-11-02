@@ -12,6 +12,8 @@ import {
   buildSearchQuery,
   parseDdgHtml,
   parseDdgLiteHtml,
+  parseBingHtml,
+  parseGoogleHtml,
   formatSearchContext,
 } from './src/brain.js'
 
@@ -194,6 +196,26 @@ console.log('── Веб-поиск: парсеры выдачи ──')
   const out = parseDdgLiteHtml(lite, 5)
   check('lite-выдача: результат найден', out.length === 1 && out[0].url === 'https://lite.example.ru/1')
   check('lite-выдача: сниппет на месте', out[0]?.snippet === 'Доллар — 80 рублей')
+}
+{
+  const bing = [
+    '<li class="b_algo"><h2><a href="https://news.ru/1">Новости <b>сегодня</b></a></h2>',
+    '<div class="b_caption"><p>Что произошло в мире</p></div></li>',
+    '<li class="b_algo"><h2><a href="/relative">Относительная ссылка — пропустить</a></h2></li>',
+  ].join('')
+  const out = parseBingHtml(bing, 5)
+  check('bing-выдача: 1 результат', out.length === 1)
+  check('bing-выдача: url и заголовок', out[0]?.url === 'https://news.ru/1' && out[0]?.title === 'Новости сегодня')
+  check('bing-выдача: сниппет', out[0]?.snippet === 'Что произошло в мире')
+}
+{
+  const google = [
+    '<a href="/url?q=https://example.ru/a&sa=U&ved=x">Пример <b>новость</b></a>',
+    '<a href="/url?q=https://www.google.com/search%3Fq%3Dx&sa=U">Внутренний — пропустить</a>',
+  ].join('')
+  const out = parseGoogleHtml(google, 5)
+  check('google-выдача: 1 результат (внутренние отфильтрованы)', out.length === 1)
+  check('google-выдача: url и заголовок', out[0]?.url === 'https://example.ru/a' && out[0]?.title === 'Пример новость')
 }
 
 console.log('── Без ИИ-ключей ──')
