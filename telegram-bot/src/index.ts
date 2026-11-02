@@ -42,7 +42,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.11 (brain v3.1)'
+const VERSION = 'v0.3.12 (brain v3.1)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -295,17 +295,31 @@ async function handleLlmTest(url: URL, env: Env): Promise<Response> {
         signal: AbortSignal.timeout(8000),
       })
       const j: any = await r.json().catch(() => ({}))
-      out.gemini = r.ok
-        ? {
-            ok: true,
-            models: (j.models || []).map((m: any) => String(m.name || '').replace(/^models\//, '')).slice(0, 8),
-          }
-        : {
-            ok: false,
-            status: r.status,
-            code: j?.error?.status || '',
-            message: String(j?.error?.message || '').slice(0, 200),
-          }
+      if (r.ok) {
+        out.gemini = {
+          ok: true,
+          models: (j.models || []).map((m: any) => String(m.name || '').replace(/^models\//, '')).slice(0, 8),
+        }
+      } else {
+        const msg = String(j?.error?.message || '')
+        const g: Record<string, unknown> = {
+          ok: false,
+          status: r.status,
+          code: j?.error?.status || '',
+          message: msg.slice(0, 200),
+        }
+        // Подсказка, чтобы «региональный» отказ не принимали за битый ключ:
+        // Google проверяет авторизацию раньше региона
+        if (/API_KEY_INVALID|API key not valid/i.test(msg)) {
+          g.note =
+            'Ключ НЕ принят Google — похоже, значение скопировано не полностью или ключ отозван. Rotate → вставить заново.'
+        } else if (/location is not supported|FAILED_PRECONDITION/i.test(msg)) {
+          g.note =
+            'Ключ, скорее всего, жив: отказ из-за региона (Google закрыл API для этой страны), а не из-за ключа. '
+            + 'Telegram-запросы приходят в европейские дата-центры — там Gemini отвечает. Финальная проверка — написать Дарии в чат.'
+        }
+        out.gemini = g
+      }
     } catch (e: any) {
       out.gemini = { ok: false, error: String(e?.message || e) }
     }
