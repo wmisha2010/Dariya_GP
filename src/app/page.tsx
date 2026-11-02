@@ -40,18 +40,27 @@ const TTS_VOICES = [
 const TTS_VOICE_STORAGE_KEY = 'daria-tts-voice'
 
 /** Пауза после конца озвучки, прежде чем снова включать микрофон (затухание эха) */
-const ECHO_GRACE_MS = 700
+const ECHO_GRACE_MS = 3000
+/** …но если пользователь активен (окно внимания) — ждём меньше, он вот-вот заговорит */
+const ECHO_GRACE_AWAKE_MS = 800
+/** Чёрное окно после активации: финалы фраз отстают от звука на 1–3с,
+ *  и хвосты музыки/речи, доехавшие сразу после «Дария», не должны
+ *  превращаться в команду. Секунда тишины после щелчка — норма */
+const WAKE_COMMAND_BLACKOUT_MS = 1200
 
 /** Метка текущей сборки: тост при загрузке показывает её, и пользователь
  *  мгновенно отличает живой билд от старого кэша в браузере */
-const BUILD_LABEL = 'v2.2 · 13:04'
+const BUILD_LABEL = 'v2.3 · 13:47'
 
 /** Голосовое управление музыкой: глаголы команды в любом месте фразы
- *  («найди в интернете музыку…», «сама включи…», «врубай рок») */
+ *  («найди в интернете музыку…», «сама включи…», «врубай рок»).
+ *  (?![а-яё]) — граница слова: «выключила» не должна совпадать с «выключи»,
+ *  иначе её собственный ответ распознаётся как команда — разговор с собой */
 const MUSIC_VERB_RE =
-  /(включи(?:те)?|включай(?:те)?|врубай(?:те)?|вруби(?:те)?|поставь(?:те)?|запусти(?:те)?|сыграй(?:те)?|играй(?:те)?|найди(?:те)?|поищи(?:те)?|открой(?:те)?|послушаем)/i
+  /(включи(?:те)?|включай(?:те)?|врубай(?:те)?|вруби(?:те)?|поставь(?:те)?|запусти(?:те)?|сыграй(?:те)?|играй(?:те)?|найди(?:те)?|поищи(?:те)?|открой(?:те)?|послушаем)(?![а-яё])/i
 /** «выключи/останови/хватит …» — остановить плеер (в любом месте фразы) */
-const MUSIC_STOP_RE = /(выключи(?:те)?|выруб[а-яё]*|останови(?:те)?|заглуши[а-яё]*|хватит)/i
+const MUSIC_STOP_RE =
+  /(выключи(?:те)?|выруб[а-яё]*|останови(?:те)?|заглуши[а-яё]*|хватит)(?![а-яё])/i
 /** Отрицание: «не включай музыку» — это не команда играть */
 const MUSIC_NEGATION_RE = /не\s+(?:включай|играй|запускай|ставь|трогай)/i
 /** «пауза…» — заморозить фоновую музыку */
@@ -135,7 +144,10 @@ function extractMusicQuery(raw: string): string {
 }
 /** В команде должна быть музыкальная тема — чтобы «включи свет» не запускал плеер */
 const MUSIC_TOPIC_RE =
-  /(песн|музык|трек|плейлист|композици|ремикс|альбом|рэп|лирик|фонк|шансон|кантри|панк|(?:^|\s)(?:рок|поп|рэп|радио)(?![а-яё])|джаз|блюз|классическ|инструментальн|фортепиан|гитар|металл|электро(?![а-яё])|танцевальн|спокойн|грустн|весел|весёл|романтич|колыбельн|хит|клип|мелод|исполнител|расслаб|концентрац|фонов|звук[а-яё]*\s+природ|дожд)/i
+  /(песн|музык|трек|плейлист|композици|ремикс|альбом|рэп|лирик|фонк|шансон|кантри|панк|(?:^|\s)(?:рок|поп|рэп|радио)(?![а-яё])|джаз|блюз|классическ|инструментальн|фортепиан|гитар|металл|электро(?![а-яё])|танцевальн|спокойн|грустн|весел|весёл|романтич|колыбельн|хит|клип|мелод|исполнител|расслаб|концентрац|фонов|звук[а-яё]*\s+природ|дожд|ютуб|youtube|видео|эфир|плеер)/i
+/** Тема для выключения: шире — «выключи ютуб/радио/видео» тоже гасит плеер */
+const STOP_TOPIC_RE =
+  /(песн|музык|трек|плейлист|композици|ремикс|альбом|радио|ютуб|youtube|видео|клип|эфир|плеер|мелод|лирик|хит|рэп|рок|поп|джаз|блюз|шансон|фонк)/i
 
 export default function Home() {
   const { toast } = useToast()
@@ -192,8 +204,14 @@ export default function Home() {
   const micDesiredRef = useRef(false)
   const ttsSpeakingRef = useRef(false)
   const musicPlayingRef = useRef(false)
+  /** Зеркала состояния плеера для колбэков без перерегистрации
+   *  (yt: 'loading' | 'playing' | 'paused' | 'idle'; audio: 'playing' | 'paused' | 'stopped') */
+  const musicPlaybackRef = useRef<string>('stopped')
+  const musicToggleRef = useRef<() => void>(() => {})
   const wasAudibleRef = useRef(false)
   const echoMuteUntilRef = useRef(0)
+  /** Черное окно после активации — хвосты чужого звука не станут командами */
+  const commandBlackoutUntilRef = useRef(0)
   const lastBusyToastRef = useRef(0)
 
   // ─── Озвучка: серверный нейроголос Edge (голос выбирается кнопкой «Голос») ─
@@ -308,14 +326,31 @@ export default function Home() {
       tts.stop()
       ttsSuppressedRef.current = true // остаток ответа пишется в чат, но молчит
     }
+    // Как у Алисы: назвала имя при играющей музыке — музыка встаёт на паузу,
+    // чтобы команда слышалась чисто (вернуть: «продолжай музыку»)
+    if (musicPlaybackRef.current === 'playing') musicToggleRef.current()
     playChime()
     setAwake(true)
+    // Хвосты, распознанные сразу после активации, — чужой звук, не команды
+    commandBlackoutUntilRef.current = Date.now() + WAKE_COMMAND_BLACKOUT_MS
     if (awakeTimerRef.current) clearTimeout(awakeTimerRef.current)
     awakeTimerRef.current = setTimeout(() => {
       awakeTimerRef.current = null
       setAwake(false)
     }, ATTENTION_MS)
   }, [tts, playChime])
+
+  /** Продлить окно внимания после выполненной команды — «громче», «дальше»,
+ *  «выключи» идут цепочкой без повторного «Дария» (как у Алисы) */
+  const keepAwake = useCallback(() => {
+    if (!micDesiredRef.current) return
+    setAwake(true)
+    if (awakeTimerRef.current) clearTimeout(awakeTimerRef.current)
+    awakeTimerRef.current = setTimeout(() => {
+      awakeTimerRef.current = null
+      setAwake(false)
+    }, ATTENTION_MS)
+  }, [])
 
   /** Закрыть окно внимания (команда принята или микрофон выключен) */
   const deactivateAssistant = useCallback(() => {
@@ -341,13 +376,13 @@ export default function Home() {
     return hits / heardWords.length >= 0.6
   }, [])
 
-  // Текст произнесённой реплики живёт ещё 3с после конца речи — за это время
+  // Текст произнесённой реплики живёт ещё 5с после конца речи — за это время
   // распознавание может отдать финал её же фразы, и он будет отброшен как эхо
   useEffect(() => {
     if (tts.speaking) return
     const timer = setTimeout(() => {
       spokenTextRef.current = ''
-    }, 3000)
+    }, 5000)
     return () => clearTimeout(timer)
   }, [tts.speaking])
 
@@ -388,6 +423,9 @@ export default function Home() {
   const musicToggle = currentIsYt ? yt.toggle : audioPlayer.toggle
   /** Музыка сейчас реально слышна (сессия активна и не на паузе) */
   const musicAudible = music !== null && musicPlayback !== 'paused'
+  /** Зеркала для колбэков активации: pause по «Дария» без пересоздания колбэка */
+  musicPlaybackRef.current = musicPlayback
+  musicToggleRef.current = musicToggle
 
   // Пока Дария говорит или слушает команду — музыка тише; отпустила — вернулась
   useEffect(() => {
@@ -461,6 +499,7 @@ export default function Home() {
           }
           const applied = musicTarget ? changeMusicVolume(next) : changeTtsVolume(next)
           const arrow = applied > current ? '🔊' : applied < current ? '🔉' : '🔊'
+          keepAwake()
           assistantLocalReply(
             applied === 0
               ? 'Выключила звук 🔇'
@@ -469,11 +508,24 @@ export default function Home() {
           return
         }
 
-        // Голосовое управление музыкой: «выключи музыку» — гасим плеер без LLM
-        if (MUSIC_STOP_RE.test(text) && MUSIC_TOPIC_RE.test(text)) {
+        // «Стоп / стой / хватит / всё» при играющем плеере — глушим без темы:
+        // так команда работает и на радио, и на ютубе, и на плейлисте
+        if (music && /^\s*(?:стоп|стой|хватит|всё)\s*[.!?]*\s*$/i.test(text)) {
           tts.stop()
           setMusic(null)
-          assistantLocalReply('Хорошо, выключила музыку 🎧')
+          keepAwake()
+          assistantLocalReply('Всё, выключила 🎧')
+          return
+        }
+
+        // Голосовое управление музыкой: «выключи музыку/радио/ютуб» — гасим
+        // плеер без LLM, что бы там ни играло (аудио, радио или YouTube)
+        if (MUSIC_STOP_RE.test(text) && STOP_TOPIC_RE.test(text)) {
+          const hadPlayback = music !== null
+          tts.stop()
+          setMusic(null)
+          keepAwake()
+          assistantLocalReply(hadPlayback ? 'Всё, выключила 🎧' : 'Музыка и так не играет 🎧')
           return
         }
 
@@ -485,6 +537,7 @@ export default function Home() {
         ) {
           const wasPlaying = musicPlayback === 'playing'
           musicToggle()
+          keepAwake()
           assistantLocalReply(wasPlaying ? 'Поставила музыку на паузу ⏸' : 'Продолжаю музыку ▶')
           return
         }
@@ -493,6 +546,7 @@ export default function Home() {
         if (music && MUSIC_NEXT_RE.test(text)) {
           const nextIndex = (music.index + 1) % music.tracks.length
           setMusic({ ...music, index: nextIndex })
+          keepAwake()
           assistantLocalReply(`Ставлю следующую: «${music.tracks[nextIndex].title}» 🎵`)
           return
         }
@@ -524,6 +578,7 @@ export default function Home() {
             tts.stop()
             musicErrorsRef.current = 0
             setMusic({ tracks, index: 0 })
+            keepAwake()
             const first = tracks[0]
             assistantLocalReply(
               `Включаю «${first.title}»${first.author ? ` — ${first.author}` : ''} 🎵`
@@ -538,7 +593,9 @@ export default function Home() {
 
         // Запрос к ассистенту с автоповтором: перегрузка API (429/503) обычно
         // проходит за секунды — молча ждём и пробуем снова; красная ошибка —
-        // только если не помогло даже после трёх попыток
+        // только если не помогло даже после трёх попыток.
+        // Это диалог, а не пульт — окно внимания закрываем
+        deactivateAssistant()
         let res: Response | null = null
         let lastErrorText = ''
         for (let attempt = 0; attempt < 3; attempt++) {
@@ -609,7 +666,7 @@ export default function Home() {
         setBusy(false)
       }
     },
-    [activeCharacter, assistantLocalReply, music, musicPlayback, musicToggle, musicVolume, ttsVolume, changeMusicVolume, changeTtsVolume, toast, tts]
+    [activeCharacter, assistantLocalReply, music, musicPlayback, musicToggle, musicVolume, ttsVolume, changeMusicVolume, changeTtsVolume, toast, tts, keepAwake, deactivateAssistant]
   )
 
   // ─── Микрофон: постоянное слушание + активация «Дария» ─────────────────
@@ -631,18 +688,24 @@ export default function Home() {
     onFinal: (text) => {
       const clean = text.trim()
       if (!clean) return
+      // Чёрное окно сразу после активации: доезжают хвосты чужого звука
+      if (Date.now() < commandBlackoutUntilRef.current) return
       const wakeHit = WAKE_WORD_RE.test(clean)
       const command = clean.replace(WAKE_STRIP_RE, '').trim()
       const audible = ttsSpeakingRef.current || musicPlayingRef.current
       const inGrace = Date.now() < echoMuteUntilRef.current
 
+      // Щит от «разговора с самой собой»: пока Дария говорит/играет музыка
+      // или звук только-только стих — принимаем ТОЛЬКО имя «Дария».
+      // Всё остальное — её голос, текст песни или их хвосты
+      if ((audible || inGrace) && !wakeHit) return
       if (wakeHit) {
         // «Дария» во время её речи/музыки = перебивание; в тишине = активация.
         // Сначала — эхо-щит: не её ли это собственные слова
         if (isSpokenEcho(clean)) return
         activateAssistant()
-      } else if ((audible || inGrace) && !awakeRef.current) {
-        // Без имени команда принимается только в тишине или в окне внимания
+      } else if (!awakeRef.current) {
+        // Без имени команда принимается только в окне внимания
         return
       }
 
@@ -665,7 +728,8 @@ export default function Home() {
         }
         return
       }
-      deactivateAssistant()
+      // Окно внимания закрывает сам send(): для музыкальных команд оно
+      // остаётся открытым (цепочки «громче», «дальше»), для чата — закрывается
       void send(command)
     },
     onError: (code) => {
@@ -725,14 +789,16 @@ export default function Home() {
 
   // Микрофон при безруком режиме НЕ выключается во время речи/музыки — иначе
   // не услышит «Дария». Вместо отключения работает эхо-щит в обработчиках,
-  // а сразу после тишины — короткая пауза на затухание звука
+  // а сразу после тишины — пауза на затухание звука: если пользователь активен
+  // (окно внимания) — короткая, если звуки кончились сами — подлиннее
   const audible = tts.speaking || musicAudible
   useEffect(() => {
     if (audible && !wasAudibleRef.current) {
       wasAudibleRef.current = true
     } else if (!audible && wasAudibleRef.current) {
       wasAudibleRef.current = false
-      echoMuteUntilRef.current = Date.now() + ECHO_GRACE_MS
+      echoMuteUntilRef.current =
+        Date.now() + (awakeRef.current ? ECHO_GRACE_AWAKE_MS : ECHO_GRACE_MS)
     }
   }, [audible])
 
