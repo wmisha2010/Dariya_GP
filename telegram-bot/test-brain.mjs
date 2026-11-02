@@ -19,6 +19,8 @@ import {
   extractWeatherCity,
   cityCandidates,
   fixFalseGoogled,
+  stripToolCallMarkup,
+  withCityContext,
 } from './src/brain.js'
 
 let passed = 0
@@ -352,6 +354,60 @@ console.log('── Честность: ложное «погуглила» ─�
   check('«погуглю» не трогаем', fixFalseGoogled('попроси — погуглю') === 'попроси — погуглю')
   check('«погуглить» не трогаем', fixFalseGoogled('хочу погуглить') === 'хочу погуглить')
   check('без слова — текст прежний', fixFalseGoogled('обычный ответ') === 'обычный ответ')
+}
+
+console.log('── Зачистка tool-call разметки (v0.3.6) ──')
+{
+  const dots = '<dots_function_call>\nweb_search\n<parameter name="query">время в Ачинске</parameter>\n</dots_function_call>'
+  check('dots-вызов целиком → пусто', stripToolCallMarkup(dots) === '')
+  check('незакрытый tool_call → пусто', stripToolCallMarkup('<tool_call>{"name":"web_search"}') === '')
+  check('<invoke> → пусто', stripToolCallMarkup('<invoke name="web_search"><parameter>q</parameter></invoke>') === '')
+  check('JSON-вызов → пусто', stripToolCallMarkup('{"name":"web_search","arguments":{"query":"погода"}}') === '')
+  check('текст + dots-блок → остаётся текст',
+    stripToolCallMarkup('Сейчас гляну. <dots_function_call><parameter>q</parameter></dots_function_call>') === 'Сейчас гляну.')
+  check('обычный ответ не тронут',
+    stripToolCallMarkup('Привет! Дела отлично 😄') === 'Привет! Дела отлично 😄')
+  check('пустая строка → пусто', stripToolCallMarkup('') === '')
+  check('null → пусто', stripToolCallMarkup(null) === '')
+}
+
+console.log('── Триггеры поиска: «посмотри в сети», время в городе ──')
+{
+  check('«посмотри в сети в Ачинске сколько время» → поиск', needsWebSearch('посмотри в сети в Ачинске сколько время') === true)
+  check('«глянь в яндексе новости» → поиск', needsWebSearch('глянь в яндексе новости') === true)
+  check('«сколько времени в Ачинске» → поиск', needsWebSearch('сколько времени в Ачинске') === true)
+  check('«время в Красноярске» → поиск', needsWebSearch('время в Красноярске') === true)
+  check('голое «Время» → БЕЗ поиска (быстрый ответ)', needsWebSearch('Время') === false)
+  check('«сколько времени займёт доставка» → БЕЗ поиска (не про город)', needsWebSearch('сколько времени займёт доставка') === false)
+}
+
+console.log('── Погода без города: город из истории диалога ──')
+{
+  check('«А погода?» + история про Ачинск → добавляем город',
+    withCityContext('А погода?', ['посмотри в сети в Ачинске сколько время']) === 'А погода? Ачинске')
+  check('город с именительного тоже подхватывается',
+    withCityContext('а погода?', ['Дария, какая погода в Красноярске сейчас']) === 'а погода? Красноярске')
+  check('без истории — как было', withCityContext('А погода?', []) === 'А погода?')
+  check('непогодная фраза не тронута',
+    withCityContext('как дела?', ['какая погода в Ачинске']) === 'как дела?')
+  check('с городом в самой фразе — не дублируем',
+    withCityContext('погода в Тюмени?', ['был в Ачинске']) === 'погода в Тюмени?')
+}
+
+console.log('── buildSearchQuery: «посмотри в сети …» ──')
+{
+  check('срезаем «посмотри в сети»',
+    buildSearchQuery('посмотри в сети в Ачинске сколько время') === 'в Ачинске сколько время')
+  check('срезаем «глянь в яндексе»',
+    buildSearchQuery('глянь в яндексе новости про радио') === 'новости про радио')
+}
+
+console.log('── Быстрое время на голое «Время» ──')
+{
+  const tz = 'Asia/Krasnoyarsk'
+  check('«Время» → быстрый ответ', resolveCommand('Время', { tz }).handled === true)
+  check('«Время» содержит цифры', /[0-9]{2}:[0-9]{2}/.test(resolveCommand('Время', { tz }).text))
+  check('«время в Ачинске» НЕ быстрый (уйдёт в поиск)', resolveCommand('время в Ачинске', { tz }).handled === false)
 }
 
 console.log(`\nИтого: ${passed} прошло, ${failed} упало`)

@@ -22,6 +22,7 @@ import {
   formatSearchContext,
   buildSearchQuery,
   fixFalseGoogled,
+  withCityContext,
 } from './brain.js'
 
 export interface Env {
@@ -39,7 +40,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.5 (brain v2.7)'
+const VERSION = 'v0.3.6 (brain v2.8)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -132,15 +133,18 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
 
   // 2) Свободные темы — через LLM (OpenRouter → Gemini)
   const history = chatHistory.get(chatId) ?? []
+  const prevUserTexts = history.filter((h) => h.role === 'user').map((h) => h.content).slice(-4)
   history.push({ role: 'user', content: text }) // в контекст — исходная фраза
   while (history.length > HISTORY_MAX_TURNS * 2) history.shift()
   chatHistory.set(chatId, history)
 
-  // 2а) Свежие данные? Гонка поисковых движков (DDG/Bing/Google/Mojeek/Википедия) → выдача в контекст LLM
+  // 2а) Свежие данные? Гонка поисковых движков → выдача в контекст LLM.
+  // Погода без города («А погода?») — берём город из предыдущих реплик диалога.
   let webContext = ''
   if ((env.WEB_SEARCH || '') !== 'off' && needsWebSearch(command)) {
     try {
-      const results = await webSearch(buildSearchQuery(command))
+      const seed = withCityContext(command, prevUserTexts)
+      const results = await webSearch(buildSearchQuery(seed))
       webContext = formatSearchContext(results, command)
     } catch { /* без поиска — ответим из знаний */ }
   }
