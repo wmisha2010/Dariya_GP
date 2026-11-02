@@ -21,6 +21,7 @@ import {
   webSearch,
   formatSearchContext,
   buildSearchQuery,
+  fixFalseGoogled,
 } from './brain.js'
 
 export interface Env {
@@ -38,11 +39,14 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3 (brain v2.6)'
+const VERSION = 'v0.3.3 (brain v2.7)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
 const HISTORY_MAX_TURNS = 8
+
+/** Дедупликация апдейтов: Telegram дёргает вебхук повторно, если мы долго отвечаем */
+const processedUpdates = new Set<number>()
 
 let cachedBotId: number | null = null
 
@@ -153,8 +157,9 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
 
   let reply: string
   if (llmText) {
-    reply = llmText
-    history.push({ role: 'assistant', content: llmText })
+    // Поиск не было — ложное «погуглила» заменяем честным «вспомнила»
+    reply = webContext ? llmText : fixFalseGoogled(llmText)
+    history.push({ role: 'assistant', content: reply })
   } else {
     reply = NO_BRAIN[Math.floor(Math.random() * NO_BRAIN.length)]
   }
@@ -245,7 +250,7 @@ async function handleSearchTest(url: URL, env: Env): Promise<Response> {
   }
 }
 
-async function handleWebhook(request: Request, env: Env): Promise<Response> {
+async function handleWebhook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const token = env.TELEGRAM_BOT_TOKEN || ''
   if (!token) return new Response('no token', { status: 500 })
 
@@ -254,20 +259,45 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
     return new Response('forbidden', { status: 403 })
   }
 
+  let update: { message?: any; update_id?: number }
   try {
-    const update = await request.json() as { message?: any }
-    if (update.message) {
-      if (!cachedBotId) await getBotId(token)
-      await handleMessage(update.message, env)
-    }
-  } catch (e) {
-    console.error('update failed', e)
+    update = await request.json() as any
+  } catch {
+    return new Response('ok')
   }
+
+  // Дедупликация по update_id (защита от повторных доставок)
+  const uid = update?.update_id
+  if (typeof uid === 'number') {
+    if (processedUpdates.has(uid)) return new Response('ok')
+    processedUpdates.add(uid)
+    if (processedUpdates.size > 300) {
+      let i = 0
+      for (const old of processedUpdates) {
+        processedUpdates.delete(old)
+        if (++i >= 150) break
+      }
+    }
+  }
+
+  // Отвечаем Telegram мгновенно, обработку — в фоне: без этого повторы и дубли ответов
+  ctx.waitUntil(
+    (async () => {
+      try {
+        if (update.message) {
+          if (!cachedBotId) await getBotId(token)
+          await handleMessage(update.message, env)
+        }
+      } catch (e) {
+        console.error('update failed', e)
+      }
+    })(),
+  )
   return new Response('ok')
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
     if (url.pathname === '/' && request.method === 'GET') return handleStatus(env)
     if (url.pathname === '/setup' && request.method === 'GET') return handleSetup(url, env)
