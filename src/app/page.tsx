@@ -42,6 +42,10 @@ const TTS_VOICE_STORAGE_KEY = 'daria-tts-voice'
 /** Пауза после конца озвучки, прежде чем снова включать микрофон (затухание эха) */
 const ECHO_GRACE_MS = 700
 
+/** Метка текущей сборки: тост при загрузке показывает её, и пользователь
+ *  мгновенно отличает живой билд от старого кэша в браузере */
+const BUILD_LABEL = 'v2.2 · 13:04'
+
 /** Голосовое управление музыкой: глаголы команды в любом месте фразы
  *  («найди в интернете музыку…», «сама включи…», «врубай рок») */
 const MUSIC_VERB_RE =
@@ -773,6 +777,19 @@ export default function Home() {
         if (!list.length) throw new Error('empty list')
         setCharacters(list)
         setCharactersError(false)
+        // Раз персонажи загрузились — страница точно живая. Один раз за сессию
+        // показываем метку сборки: увидел тост «v2.2» — значит кэш побеждён.
+        try {
+          if (sessionStorage.getItem('daria-build-toast') !== BUILD_LABEL) {
+            sessionStorage.setItem('daria-build-toast', BUILD_LABEL)
+            toast({
+              title: `Дария · сборка ${BUILD_LABEL}`,
+              description: 'Свежая версия загружена — старый кэш не активен',
+            })
+          }
+        } catch {
+          /* без sessionStorage тост просто покажется чаще */
+        }
         const first = list.find((c) => c.isDefault) ?? list[0] ?? null
         if (first) {
           setActiveCharacter(first)
@@ -789,7 +806,7 @@ export default function Home() {
         return false
       }
     },
-    [loadHistory]
+    [loadHistory, toast]
   )
 
   useEffect(() => {
