@@ -725,3 +725,14 @@ HTML страниц — свежий (вместе с выключателем) 
   правки v2.5 выполнены python-скриптом с проверкой каждого вхождения
   (scripts/apply_v25.py + apply_v25_settings.py), page.tsx перед этим
   откатывался из git.
+
+## 2026-11-02 · v2.5 · публикация кода на GitHub (подготовка)
+- README.md (RU): возможности v2.5, стек, быстрый старт, структура, что не входит в репо.
+- .env.example: DATABASE_URL (file:../db/custom.db), ключи OPENROUTER/GEMINI — шаблон.
+- Гигиена репозитория: untrack .env, db/custom.db, models/piper/*.onnx (не используется
+  в коде — проверено grep по src/), tmp/, tool-results/, upload/, download/, скриншоты,
+  *.pid; .gitignore дополнен (с исключением !.env.example).
+- Экспорт снапшота: git archive → download/daria-voice-assistant-v2.5-src.zip
+  (164 файла, 616 КБ, без секретов/бд/модели/мусора — проверено unzip -l).
+- Полная история git (.git, 66 МБ) остаётся в песочнице; для сохранения истории
+  нужен push из песочницы (токен/доступ), zip — снапшот без истории.
