@@ -210,6 +210,11 @@ console.log('── Веб-поиск: парсеры выдачи ──')
   check('bing-выдача: сниппет', out[0]?.snippet === 'Что произошло в мире')
 }
 {
+  const dirty = '<li class="b_algo"><h2><a href="https://ria.ru/">ria.ruhttps://ria.ru</a></h2><p>Лента новостей</p></li>'
+  const out = parseBingHtml(dirty, 5)
+  check('bing-выдача: адрес вычищен из заголовка', out[0]?.title === 'ria.ru')
+}
+{
   const google = [
     '<a href="/url?q=https://example.ru/a&sa=U&ved=x">Пример <b>новость</b></a>',
     '<a href="/url?q=https://www.google.com/search%3Fq%3Dx&sa=U">Внутренний — пропустить</a>',

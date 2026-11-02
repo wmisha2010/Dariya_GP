@@ -258,7 +258,8 @@ export function parseBingHtml(html, max = 5) {
     const body = block[1]
     const a = body.match(/<a[^>]*href=["'](https?:\/\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/i)
     if (!a) continue
-    const title = stripTags(a[2])
+    let title = stripTags(a[2])
+    title = title.replace(/https?:\/\/\S+/g, '').replace(/\s{2,}/g, ' ').trim() // бинг вклеивает адрес в текст ссылки
     if (!title) continue
     const p = body.match(/<p[^>]*>([\s\S]*?)<\/p>/i)
     out.push({ title, url: a[1], snippet: stripTags(p?.[1] || '') })
