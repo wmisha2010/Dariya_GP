@@ -251,5 +251,51 @@ console.log('── Веб-поиск: регрессия вызова движ�
   }
 }
 
+console.log('── Валюты: приоритет ЦБ РФ ──')
+{
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (/cbr-xml-daily/.test(String(url))) {
+      return new Response(
+        JSON.stringify({
+          Date: '2026-10-31T11:30:00+03:00',
+          Valute: {
+            USD: { Name: 'Доллар США', Value: 80.5573, Previous: 80.6761 },
+            EUR: { Name: 'Евро', Value: 89.6603, Previous: 89.8167 },
+          },
+        }),
+        { status: 200 },
+      )
+    }
+    return new Response('blocked', { status: 500 })
+  }
+  try {
+    const r = await webSearch('курс доллара к рублю тест ' + Date.now())
+    check('валюта: источник — ЦБ РФ', r[0]?.engine === 'цб-рф')
+    check('валюта: точное значение в сниппете', r[0]?.snippet.includes('80,56'))
+    check('валюта: дата курса указана', r[0]?.title.includes('31.10.2026'))
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+console.log('── Bing: раскодировка редиректов и фильтр мусора ──')
+{
+  const dirty = [
+    '<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?!&amp;&amp;u=a1aHR0cHM6Ly9leGFtcGxlLnJ1Lw==">Пример сайта</a></h2><p>Сниппет примера</p></li>',
+    '<li class="b_algo"><h2><a href="https://www.bing.com/set/search">Bing</a></h2></li>',
+  ].join('')
+  const out = parseBingHtml(dirty, 5)
+  check('bing: редирект /ck/a раскодирован', out[0]?.url === 'https://example.ru/')
+  check('bing: ссылка бинга на себя отброшена', out.length === 1)
+}
+
+console.log('── Контекст поиска: честность ──')
+{
+  const ctx = formatSearchContext([{ title: 'Т', url: 'https://x.ru', snippet: 'С' }], 'тест')
+  check('контекст: предупреждение о старых сниппетах', ctx.includes('старые данные'))
+  check('контекст: запрет выдумывать цифры', ctx.includes('не выдумывай цифры'))
+}
+
 console.log(`\nИтого: ${passed} прошло, ${failed} упало`)
 process.exit(failed ? 1 : 0)

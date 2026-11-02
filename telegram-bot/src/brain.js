@@ -261,8 +261,10 @@ export function parseBingHtml(html, max = 5) {
     let title = stripTags(a[2])
     title = title.replace(/https?:\/\/\S+/g, '').replace(/\s{2,}/g, ' ').trim() // бинг вклеивает адрес в текст ссылки
     if (!title) continue
+    const url = decodeBingHref(a[1])
+    if (/^https?:\/\/([a-z0-9-]+\.)*(bing\.com|microsoft\.com)\//i.test(url)) continue // редиректы и ссылки бинга на себя — мусор
     const p = body.match(/<p[^>]*>([\s\S]*?)<\/p>/i)
-    out.push({ title, url: a[1], snippet: stripTags(p?.[1] || '') })
+    out.push({ title, url, snippet: stripTags(p?.[1] || '') })
   }
   return out
 }
@@ -328,6 +330,48 @@ async function wikipediaSearch(q, max) {
   return results
 }
 
+/** Запросы про курс валют — отвечаем точными данными ЦБ РФ вместо сниппетов (сниппеты врут датой) */
+const CURRENCY_RE =
+  /курс[а-яё]*\s+(доллара|евро|юаня|фунта|тенге|иены|лиры|франка|крон|вон)|курс\s+валют|доллара?\s+к\s+рубл|евро\s+к\s+рубл|сколько\s+(сейчас\s+)?стоит\s+(доллар|евро|юань)/i
+
+/** Официальные курсы ЦБ РФ через открытый JSON-зеркал cbr-xml-daily.ru */
+export async function cbrRates() {
+  const res = await fetch('https://www.cbr-xml-daily.ru/daily_json.js', {
+    headers: { 'User-Agent': 'DariaBot/0.3 (personal assistant bot)' },
+    signal: AbortSignal.timeout(6000),
+  })
+  if (!res.ok) throw new Error('cbr ' + res.status)
+  const d = await res.json()
+  const v = d.Valute || {}
+  const f = (x) => (x?.Value ?? 0).toFixed(2).replace('.', ',')
+  const day = String(d.Date || '').slice(0, 10).split('-').reverse().join('.')
+  const parts = []
+  if (v.USD) parts.push(`доллар США — ${f(v.USD)} ₽ (вчера ${f({ Value: v.USD.Previous })})`)
+  if (v.EUR) parts.push(`евро — ${f(v.EUR)} ₽ (вчера ${f({ Value: v.EUR.Previous })})`)
+  if (v.CNY) parts.push(`юань — ${f(v.CNY)} ₽`)
+  if (!parts.length) throw new Error('cbr пусто')
+  return {
+    title: `Курсы ЦБ РФ на ${day}`,
+    url: 'https://www.cbr-xml-daily.ru/',
+    snippet: parts.join('; ') + '. Это официальный курс Банка России.',
+    engine: 'цб-рф',
+  }
+}
+
+/** Бинг прячет настоящие ссылки за редиректами /ck/a?...&u=a1<base64> — раскодируем */
+function decodeBingHref(href) {
+  const m = href.replace(/&amp;/g, '&').match(/[?&]u=a1([A-Za-z0-9_-]+)/)
+  if (!m) return href
+  let b64 = m[1].replace(/-/g, '+').replace(/_/g, '/')
+  while (b64.length % 4) b64 += '='
+  try {
+    const out = atob(b64)
+    return /^https?:\/\//.test(out) ? out : href
+  } catch {
+    return href
+  }
+}
+
 /** Кэш выдачи: не ходим в поисковики дважды за 10 минут */
 const searchCache = new Map()
 const SEARCH_CACHE_TTL = 10 * 60 * 1000
@@ -344,6 +388,15 @@ export async function webSearch(query, opts = {}) {
   const key = q.toLowerCase()
   const cached = searchCache.get(key)
   if (cached && Date.now() - cached.t < SEARCH_CACHE_TTL) return cached.r
+  // Курсы валют — приоритет: точные данные ЦБ РФ, если доступны
+  if (CURRENCY_RE.test(q)) {
+    try {
+      const cbr = await cbrRates()
+      if (searchCache.size > 50) searchCache.clear()
+      searchCache.set(key, { r: [cbr], t: Date.now() })
+      return [cbr]
+    } catch { /* ЦБ не ответил — обычный поиск */ }
+  }
   const headers = {
     'User-Agent': SEARCH_UA,
     'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
@@ -377,9 +430,9 @@ export function formatSearchContext(results, query) {
     (r, i) => `${i + 1}. ${r.title}${r.snippet ? ' — ' + r.snippet : ''} (${r.url})`,
   )
   return [
-    `[Результаты веб-поиска по запросу «${query}» — только что из интернета]`,
+    `[Результаты веб-поиска по запросу «${query}» — выдача свежая, но в сниппетах бывают старые данные: если указана дата, считай её датой информации]`,
     ...lines,
-    'Опирайся на эти данные в ответе; можешь упомянуть, что только что погуглила. Если данных мало — скажи честно.',
+    'Опирайся на эти данные и можешь упомянуть, что только что погуглила. Если данных мало или они противоречивы — честно скажи, что не нашла надёжного ответа, и не выдумывай цифры.',
   ].join('\n')
 }
 
@@ -445,7 +498,7 @@ export const SYSTEM_PROMPT = [
   'Никогда не начинай ответ с имени собеседника. Не представляйся, если не спросили.',
   'Ты живёшь в облаке (Cloudflare), а не «локально»; в интернет выходишь только через встроенный поиск.',
   'Если приложен блок [Результаты веб-поиска] — опирайся на эти данные и можешь похвастаться, что только что погуглила.',
-  'Если такого блока нет, а спрашивают про «прямо сейчас» — честно скажи, что в сеть не заглядывала, и предложи: «попроси — погуглю».',
+  'Если такого блока нет, а спрашивают про «прямо сейчас» — честно скажи, что в сеть не заглядывала, и НЕ называй конкретных цифр и дат из памяти (они устаревшие); предложи: «попроси — погуглю».',
   'Если просят помощь по музыке: у тебя нет плеера в Telegram, радио и музыка живут в твоей веб-версии.',
 ].join(' ')
 
@@ -463,7 +516,16 @@ export async function askLLM(history, opts = {}) {
   const geminiKey = opts.geminiKey || ''
   const primary = opts.openrouterModel || 'poolside/laguna-s-2.1:free'
   const webContext = opts.webContext || ''
-  const system = webContext ? `${SYSTEM_PROMPT}\n\n${webContext}` : SYSTEM_PROMPT
+  let system = SYSTEM_PROMPT
+  if (opts.tz) {
+    try {
+      const today = new Intl.DateTimeFormat('ru-RU', {
+        timeZone: opts.tz, day: 'numeric', month: 'long', year: 'numeric', weekday: 'long',
+      }).format(new Date())
+      system += ` Сегодня ${today}. Не называй прошедших дат как «сегодня».`
+    } catch { /* кривой tz — без даты */ }
+  }
+  if (webContext) system += `\n\n${webContext}`
 
   if (openrouterKey) {
     const models = [primary, ...OPENROUTER_FALLBACKS.filter((m) => m !== primary)]

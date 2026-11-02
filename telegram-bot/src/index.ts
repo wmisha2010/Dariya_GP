@@ -148,6 +148,7 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
     geminiBaseUrl: env.GEMINI_BASE_URL || '',
     geminiModel: env.GEMINI_MODEL || '',
     webContext,
+    tz,
   })
 
   let reply: string
