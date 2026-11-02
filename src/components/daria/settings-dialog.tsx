@@ -199,7 +199,7 @@ export function SettingsDialog({
 
         {/* Версия интерфейса: маркер свежего билда — если её видно, кэш побеждён */}
         <p className="mt-4 text-center text-[10px] tracking-wide text-white/25">
-          Дария · интерфейс v2.1 · музыка и радио из интернета · 2 ноября 2026
+          Дария · интерфейс v2.2 · сборка 13:04 · 2 ноября 2026
         </p>
       </DialogContent>
     </Dialog>
