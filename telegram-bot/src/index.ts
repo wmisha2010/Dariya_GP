@@ -43,7 +43,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.14 (brain v3.1)'
+const VERSION = 'v0.3.15 (brain v3.2)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -190,15 +190,27 @@ async function handleStatus(env: Env): Promise<Response> {
       webhookInfo = '<p>getWebhookInfo: недоступен</p>'
     }
   }
+  // Строка «Мозг»: различаем три состояния, чтобы хозяин видел, чего не хватает
+  let brainLine: string
+  if (env.GEMINI_API_KEY) {
+    const model = env.GEMINI_MODEL ? ': ' + env.GEMINI_MODEL : ''
+    const spare = env.OPENROUTER_API_KEY ? ' + запасной OpenRouter' : ''
+    const via = env.GEMINI_BASE_URL
+      ? `через мост${model}${spare}`
+      : /^sk-/.test(env.GEMINI_API_KEY)
+        ? `ключ sk-gemini… ждёт мост — добавьте секрет GEMINI_BASE_URL (адрес туннеля gemini-web2api), пока отвечает OpenRouter${spare}`
+        : `напрямую${model}${spare}`
+    brainLine = `<p>Мозг: подключён ✅ <small>(Gemini ${via})</small></p>`
+  } else if (env.OPENROUTER_API_KEY) {
+    brainLine = `<p>Мозг: подключён ✅ <small>(OpenRouter — основной мозг: ${env.OPENROUTER_MODEL || 'по умолчанию'})</small></p>`
+  } else {
+    brainLine = '<p>Мозг: НЕ подключён 😴 — добавьте секрет GEMINI_API_KEY или OPENROUTER_API_KEY</p>'
+  }
   return html([
     '<h1>Дария-бот жива 😏</h1>',
     `<p>Версия: ${VERSION}</p>`,
     token ? '<p>Токен: задан ✅</p>' : '<p>Токен: НЕ задан — добавьте секрет TELEGRAM_BOT_TOKEN</p>',
-    env.GEMINI_API_KEY
-      ? `<p>Мозг: подключён ✅ <small>(Gemini${env.GEMINI_MODEL ? ': ' + env.GEMINI_MODEL : ''}${env.OPENROUTER_API_KEY ? ' + запасной OpenRouter' : ''})</small></p>`
-      : env.OPENROUTER_API_KEY
-        ? `<p>Мозг: подключён ✅ <small>(OpenRouter — основной мозг: ${env.OPENROUTER_MODEL || 'по умолчанию'})</small></p>`
-        : '<p>Мозг: НЕ подключён 😴 — добавьте секрет GEMINI_API_KEY или OPENROUTER_API_KEY</p>',
+    brainLine,
     `<p>Веб-поиск: ${env.WEB_SEARCH === 'off' ? 'выключен 🚫' : 'включён 🌐 (5 движков + Википедия)'}</p>`,
     webhookInfo,
     '<p>Setup: <code>/setup?bot_token=ТОКЕН</code></p>',
@@ -288,9 +300,14 @@ async function handleLlmTest(url: URL, env: Env): Promise<Response> {
   }
 
   // Ключ Gemini жив? (список моделей — лёгкий запрос, полный ответ см. ?text=)
+  // keyType: sk-gemini-… — это ключ моста gemini-web2api, напрямую в Google он не работает
   const geminiKey = env.GEMINI_API_KEY || ''
   if (geminiKey) {
     const base = (env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '')
+    const keyType = /^sk-/.test(geminiKey) ? 'мост gemini-web2api (sk-gemini-…)' : 'Google AI Studio'
+    const bridgeNote = /^sk-/.test(geminiKey) && !env.GEMINI_BASE_URL
+      ? 'Ключ от моста gemini-web2api: без секрета GEMINI_BASE_URL (адрес туннеля) мозг сразу отвечает через OpenRouter. Когда мост поднят — добавьте GEMINI_BASE_URL и нажмите Deploy.'
+      : ''
     try {
       const r = await fetch(`${base}/models?pageSize=8&key=${encodeURIComponent(geminiKey)}`, {
         signal: AbortSignal.timeout(8000),
@@ -323,6 +340,13 @@ async function handleLlmTest(url: URL, env: Env): Promise<Response> {
       }
     } catch (e: any) {
       out.gemini = { ok: false, error: String(e?.message || e) }
+    } finally {
+      // keyType и подсказку приписываем к любому исходу проверки (правка
+      // unknown-объекта на месте не компилируется — работаем через локальный Record)
+      const g = (out.gemini || {}) as Record<string, unknown>
+      g.keyType = keyType
+      if (bridgeNote) g.note = g.note ? `${String(g.note)} ${bridgeNote}` : bridgeNote
+      out.gemini = g
     }
   } else {
     out.gemini = { ok: false, error: 'секрет GEMINI_API_KEY не задан' }

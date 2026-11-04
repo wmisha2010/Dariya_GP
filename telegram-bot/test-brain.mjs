@@ -22,6 +22,7 @@ import {
   stripToolCallMarkup,
   withCityContext,
   timeLookup,
+  resetGeminiBreaker,
 } from './src/brain.js'
 
 let passed = 0
@@ -441,6 +442,7 @@ console.log('── Быстрое время на голое «Время» ─
 
 console.log('── askLLM: Gemini главный, OpenRouter запасной ──')
 {
+  resetGeminiBreaker()
   const realFetch = globalThis.fetch
   const calls = []
   globalThis.fetch = async (url) => {
@@ -460,9 +462,12 @@ console.log('── askLLM: Gemini главный, OpenRouter запасной �
     const reply = await askLLM([{ role: 'user', content: 'привет' }], { openrouterKey: 'or', geminiKey: 'gk' })
     check('Gemini отвечает первым, пока жив', reply === 'Ответ Гемини')
     check('OpenRouter не вызывался, пока жив Gemini', calls.every((u) => u.includes('generativelanguage')))
-    check('первая модель — gemini-3.8-flash', (calls[0] || '').includes('models/gemini-3.8-flash:'))
+    check('первая модель — gemini-3.6-flash', (calls[0] || '').includes('models/gemini-3.6-flash:'))
     check('ключ в query-параметре', (calls[0] || '').includes('key=gk'))
-  } finally { globalThis.fetch = realFetch }
+  } finally {
+    globalThis.fetch = realFetch
+    resetGeminiBreaker()
+  }
 }
 {
   const realFetch = globalThis.fetch
@@ -484,11 +489,12 @@ console.log('── askLLM: Gemini главный, OpenRouter запасной �
     const gModels = calls.filter((u) => u.includes('generativelanguage'))
       .map((u) => (u.match(/models\/([^:]+):/) || [])[1])
     check('Gemini лёг весь → ответ из OpenRouter', reply === 'Ответ OpenRouter')
-    check('перебрали цепочку Gemini: основная + 2 алиаса',
-      gModels.join(',') === 'gemini-3.8-flash,gemini-flash-latest,gemini-2.5-flash')
+    check('перебрали цепочку Gemini: основная + 3 алиаса',
+      gModels.join(',') === 'gemini-3.6-flash,gemini-3.5-flash-lite,gemini-flash-latest,gemini-2.5-flash')
   } finally {
     globalThis.fetch = realFetch
     console.error = realErr
+    resetGeminiBreaker()
   }
 }
 {
@@ -514,6 +520,64 @@ console.log('── askLLM: Gemini главный, OpenRouter запасной �
   } finally {
     globalThis.fetch = realFetch
     console.error = realErr
+    resetGeminiBreaker()
+  }
+}
+{
+  // sk-gemini-… — ключ моста: без GEMINI_BASE_URL заведомо не работает в Google,
+  // мозг должен сразу идти в OpenRouter, не тратя время на отказные запросы
+  resetGeminiBreaker()
+  const realFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: 'Сразу из OpenRouter' } }] }),
+      { headers: { 'content-type': 'application/json' } },
+    )
+  }
+  try {
+    const reply = await askLLM([{ role: 'user', content: 'привет' }], {
+      openrouterKey: 'or',
+      geminiKey: 'sk-gemini-abc123',
+    })
+    check('sk-ключ без моста → ответ из OpenRouter', reply === 'Сразу из OpenRouter')
+    check('sk-ключ без моста → к Google не ходили вообще', calls.every((u) => !u.includes('generativelanguage')))
+  } finally {
+    globalThis.fetch = realFetch
+    resetGeminiBreaker()
+  }
+}
+{
+  // Предохранитель: 2 подряд полных провала Gemini → 3 минуты сразу OpenRouter
+  resetGeminiBreaker()
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  let geminiCalls = 0
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('generativelanguage')) {
+      geminiCalls++
+      return new Response('{"error":{"code":500,"message":"bridge down"}}', { status: 500 })
+    }
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: 'Запаска' } }] }),
+      { headers: { 'content-type': 'application/json' } },
+    )
+  }
+  try {
+    await askLLM([{ role: 'user', content: 'раз' }], { openrouterKey: 'or', geminiKey: 'gk' })
+    const afterFirst = geminiCalls
+    await askLLM([{ role: 'user', content: 'два' }], { openrouterKey: 'or', geminiKey: 'gk' })
+    const afterSecond = geminiCalls
+    const third = await askLLM([{ role: 'user', content: 'три' }], { openrouterKey: 'or', geminiKey: 'gk' })
+    check('первые два вызова пытались в Gemini (по 4 модели)', afterFirst > 0 && afterSecond > afterFirst)
+    check('после двух полных провалов Gemini пропущен', geminiCalls === afterSecond)
+    check('на пропуске ответ всё равно пришёл из OpenRouter', third === 'Запаска')
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+    resetGeminiBreaker()
   }
 }
 {

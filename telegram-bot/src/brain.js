@@ -140,8 +140,8 @@ const MEDIA_YOUTUBE = [
   'Без ссылки не играю 😄 Кинь ютуб-линк, или заходи в веб-версию:',
 ]
 export const NO_BRAIN = [
-  'Мозг сегодня молчит — провайдер не ответил 😅 Чаще всего это лимиты бесплатных моделей OpenRouter. Хозяину: повтори через минуту.',
-  'Хотела ответить умно, но мозг промолчал 😄 Хозяину намёк: у бесплатных моделей OpenRouter лимиты — попробуй позже или добавь GEMINI_API_KEY (станет главным мозгом).',
+  'Мозг сегодня молчит — ни Gemini, ни запасной OpenRouter не ответили 😅 Чаще всего это лимиты бесплатных моделей или спящий мост. Хозяину: повтори через минуту.',
+  'Хотела ответить умно, но мозг промолчал 😄 Хозяину намёк: у бесплатных моделей OpenRouter суточные лимиты, а мост Gemini мог быть выключен — попробуй позже.',
 ]
 
 export function formatTime(tz = 'Europe/Moscow') {
@@ -738,8 +738,23 @@ export const OPENROUTER_CHAIN = [
   'recursive/flint-v1.0:free',
   'google/gemma-4-26b-a4b-it:free',
 ]
-/** Цепочка имён Gemini: основная → стабильные алиасы (если имя устарело — HTTP 404) */
-const GEMINI_FALLBACKS = ['gemini-flash-latest', 'gemini-2.5-flash']
+/** Цепочка имён Gemini: основная → алиасы (несуществующее имя даёт быстрый 404 — идём дальше).
+ *  gemini-3.6-flash и gemini-3.5-flash-lite — имена моделей моста gemini-web2api (есть и в официальном API) */
+const GEMINI_FALLBACKS = ['gemini-3.5-flash-lite', 'gemini-flash-latest', 'gemini-2.5-flash']
+
+// ── Предохранитель Gemini ────────────────────────────────────────────────
+// Зависший/больной мост не должен съедать 20 секунд на КАЖДОМ сообщении:
+// после двух подряд полных провалов Gemini три минуты отвечаем сразу через
+// OpenRouter. Состояние живёт в изоляте воркера — защита мягкая, best effort.
+const geminiBreaker = { fails: 0, skipUntil: 0 }
+const GEMINI_BREAKER_AFTER = 2
+const GEMINI_BREAKER_COOLDOWN_MS = 3 * 60 * 1000
+
+/** Сброс предохранителя — для тестов (test-brain.mjs). */
+export function resetGeminiBreaker() {
+  geminiBreaker.fails = 0
+  geminiBreaker.skipUntil = 0
+}
 
 /**
  * history: [{role: 'user'|'assistant', content: string}] — последние ходы,
@@ -769,9 +784,15 @@ export async function askLLM(history, opts = {}) {
   // Gemini — главный мозг: заметно умнее бесплатных моделей OpenRouter и не
   // страдает ложными вызовами инструментов. Перебираем имена моделей: если
   // конкретное устарело (HTTP 404), пробуем следующее из цепочки.
-  if (geminiKey) {
+  //
+  // Ключ sk-gemini-… — это ключ моста gemini-web2api: напрямую в Google он НЕ
+  // работает. Если GEMINI_BASE_URL не задан (мост ещё не подключён), не долбим
+  // Google заведомо отказными запросами — сразу отвечаем через OpenRouter.
+  const bridgeMode = Boolean(opts.geminiBaseUrl)
+  const bridgeKey = /^sk-/.test(geminiKey)
+  if (geminiKey && (bridgeMode || !bridgeKey) && Date.now() >= geminiBreaker.skipUntil) {
     const base = (opts.geminiBaseUrl || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '')
-    const models = [...new Set([opts.geminiModel || 'gemini-3.8-flash', ...GEMINI_FALLBACKS])]
+    const models = [...new Set([opts.geminiModel || 'gemini-3.6-flash', ...GEMINI_FALLBACKS])]
     for (const model of models) {
       try {
         const res = await fetch(
@@ -798,7 +819,10 @@ export async function askLLM(history, opts = {}) {
           const data = await res.json()
           const raw = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim()
           const text = stripToolCallMarkup(raw)
-          if (text) return text
+          if (text) {
+            geminiBreaker.fails = 0 // успех — сбрасываем счётчик провалов
+            return text
+          }
           console.error(`[gemini] ${model}: пустой ответ после зачистки`)
         } else {
           const err = await res.text().catch(() => '')
@@ -807,6 +831,15 @@ export async function askLLM(history, opts = {}) {
       } catch (e) {
         console.error(`[gemini] ${model}: ${e?.message || e}`)
       }
+    }
+    // Дошли до конца цикла — ни одна модель не ответила, учитываем провал
+    geminiBreaker.fails += 1
+    if (geminiBreaker.fails >= GEMINI_BREAKER_AFTER) {
+      console.error(
+        `[gemini] ${GEMINI_BREAKER_AFTER} провала подряд — ${GEMINI_BREAKER_COOLDOWN_MS / 1000} с отвечаем только через OpenRouter`,
+      )
+      geminiBreaker.fails = 0
+      geminiBreaker.skipUntil = Date.now() + GEMINI_BREAKER_COOLDOWN_MS
     }
   }
 
