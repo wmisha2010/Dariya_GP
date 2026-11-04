@@ -198,7 +198,7 @@ async function handleStatus(env: Env): Promise<Response> {
     const via = env.GEMINI_BASE_URL
       ? `через мост${model}${spare}`
       : /^sk-/.test(env.GEMINI_API_KEY)
-        ? `ключ sk-gemini… ждёт мост — добавьте секрет GEMINI_BASE_URL (адрес туннеля gemini-web2api), пока отвечает OpenRouter${spare}`
+        ? `ключ sk-gemini… ждёт мост — добавьте секрет GEMINI_BASE_URL (адрес туннеля), когда поднимешь gemini-web2api${spare}`
         : `напрямую${model}${spare}`
     brainLine = `<p>Мозг: подключён ✅ <small>(Gemini ${via})</small></p>`
   } else if (env.OPENROUTER_API_KEY) {
