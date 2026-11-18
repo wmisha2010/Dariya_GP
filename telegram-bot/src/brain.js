@@ -345,8 +345,8 @@ export const NEWS_RE =
 const GENERIC_NEWS_RE =
   /^(?:последние|свежие|главные|сегодняшние|срочные|топ)?\s*(?:новост[а-яё]*|события|что нового|что происходит|что творится|что слышно)\s*(?:в\s+(?:мире|россии|стране|сети|интернете)|у\s+нас)?\s*[?!.]*$/i
 
-/** Разбор RSS-ленты Google News: <item> с title «Заголовок - Источник», link, pubDate */
-export function parseNewsRss(xml, max = 6) {
+/** Разбор RSS-ленты: <item> с title «Заголовок - Источник», link, pubDate */
+export function parseNewsRss(xml, max = 6, engine = 'google-news') {
   const items = [...String(xml || '').matchAll(/<item>([\s\S]*?)<\/item>/g)]
   const out = []
   const dateFmt = new Intl.DateTimeFormat('ru-RU', {
@@ -361,7 +361,7 @@ export function parseNewsRss(xml, max = 6) {
     }
     const rawTitle = pick('title')
     if (!rawTitle) continue
-    // Google News складывает источник в конец заголовка: «Заголовок - Источник»
+    // У агрегаторов источник в конце заголовка: «Заголовок - Источник»
     const dash = rawTitle.lastIndexOf(' - ')
     const title = dash > 0 ? rawTitle.slice(0, dash) : rawTitle
     const url = pick('link')
@@ -371,26 +371,46 @@ export function parseNewsRss(xml, max = 6) {
       return Number.isNaN(d.getTime()) ? '' : dateFmt.format(d)
     })()
     const source = pick('source') || (dash > 0 ? rawTitle.slice(dash + 3) : '')
-    out.push({ title, url, snippet: [source, when].filter(Boolean).join(', '), engine: 'google-news' })
+    out.push({ title, url, snippet: [source, when].filter(Boolean).join(', '), engine })
   }
   return out
 }
 
-/** Живые новости через RSS Google News: пустой/общий запрос — топ-лента дня,
- *  с темой («новости футбола») — поиск по ленте. Работает из датацентра без капчи. */
+/** Новостные RSS-ленты для общего запроса. Google News может не отвечать из
+ *  датацентра Cloudflare (проверено 2026-11-18: fetch виснет до таймаута), поэтому
+ *  ленты стартуют ГОНКОЙ — победитель тот, кто первым отдаст валидный RSS:
+ *  Google News + Lenta + РИА + ТАСС (все проверенно живы, RSS 2.0 с pubDate). */
+const NEWS_FEEDS = [
+  ['google-news', () => 'https://news.google.com/rss?hl=ru&gl=RU&ceid=RU:ru'],
+  ['lenta', () => 'https://lenta.ru/rss/news'],
+  ['ria', () => 'https://ria.ru/export/rss2/archive/index.xml'],
+  ['tass', () => 'https://tass.ru/rss/v2.xml'],
+]
+
+async function fetchNewsFeed(name, url, max) {
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'DariaBot/0.3 (personal assistant bot)', 'Accept-Language': 'ru-RU,ru;q=0.9' },
+    signal: AbortSignal.timeout(5000),
+  })
+  if (!res.ok) throw new Error(name + ' ' + res.status)
+  const items = parseNewsRss(await res.text(), max, name)
+  if (!items.length) throw new Error(name + ' пусто')
+  return items
+}
+
+/** Живые новости: общий запрос («последние новости», «что происходит?») — гонка
+ *  топ-лент; с темой («новости футбола») — поиск по ленте Google News
+ *  (тематического поиска у российских RSS нет, при сбое — обычный поиск движков). */
 export async function newsSearch(query, max = 6) {
   const t = (query || '').trim()
-  const url = !t || GENERIC_NEWS_RE.test(t)
-    ? 'https://news.google.com/rss?hl=ru&gl=RU&ceid=RU:ru'
-    : 'https://news.google.com/rss/search?q=' + encodeURIComponent(t) + '&hl=ru&gl=RU&ceid=RU:ru'
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'DariaBot/0.3 (personal assistant bot)' },
-    signal: AbortSignal.timeout(8000),
-  })
-  if (!res.ok) throw new Error('google-news ' + res.status)
-  const items = parseNewsRss(await res.text(), max)
-  if (!items.length) throw new Error('google-news пусто')
-  return items
+  if (!t || GENERIC_NEWS_RE.test(t)) {
+    return Promise.any(NEWS_FEEDS.map(([name, feed]) => fetchNewsFeed(name, feed(), max)))
+  }
+  return fetchNewsFeed(
+    'google-news',
+    'https://news.google.com/rss/search?q=' + encodeURIComponent(t) + '&hl=ru&gl=RU&ceid=RU:ru',
+    max,
+  )
 }
 
 /** Запросы про курс валют — отвечаем точными данными ЦБ РФ вместо сниппетов (сниппеты врут датой) */

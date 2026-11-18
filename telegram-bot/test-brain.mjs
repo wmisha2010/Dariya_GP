@@ -471,12 +471,16 @@ console.log('── Новости: Google News RSS вместо статей В
   }
   try {
     const top = await newsSearch('последние новости')
-    check('newsSearch: общий запрос → главная лента топ-новостей',
-      urls[0] === 'https://news.google.com/rss?hl=ru&gl=RU&ceid=RU:ru')
-    check('newsSearch: разобрал живой заголовок', top[0].title === 'Живой заголовок')
+    check('newsSearch: общий запрос → гонка лент (Google News + Lenta + РИА + ТАСС)',
+      urls.includes('https://news.google.com/rss?hl=ru&gl=RU&ceid=RU:ru')
+      && urls.includes('https://lenta.ru/rss/news')
+      && urls.includes('https://ria.ru/export/rss2/archive/index.xml')
+      && urls.includes('https://tass.ru/rss/v2.xml'))
+    check('newsSearch: разобрал живой заголовок', top.length === 1 && top[0].title === 'Живой заголовок')
+    check('newsSearch: у победителя метка ленты', ['google-news', 'lenta', 'ria', 'tass'].includes(top[0].engine))
     const themed = await newsSearch('новости футбола')
-    check('newsSearch: тема → поиск по ленте',
-      urls[1].startsWith('https://news.google.com/rss/search?q=') && urls[1].includes('%D1%84'))
+    check('newsSearch: тема → поиск по ленте Google News',
+      urls.some((u) => u.startsWith('https://news.google.com/rss/search?q=') && u.includes('%D1%84')))
     check('newsSearch: тема вернула результат', themed.length === 1)
     const viaWeb = await webSearch('свежие новости в мире ' + Date.now())
     check('webSearch: новостной запрос идёт в Google News, не в Википедию',
