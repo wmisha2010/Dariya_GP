@@ -743,13 +743,16 @@ export const OPENROUTER_CHAIN = [
 const GEMINI_FALLBACKS = ['gemini-3.5-flash-lite', 'gemini-flash-latest', 'gemini-2.5-flash']
 
 // ── Coarena: главный мозг (coarena.ai, OpenAI-совместимый API) ───────────
-// Один ключ арены открывает все модели (Claude, GPT, Gemini, Grok…). Ошибки:
-// 402 — модель не входит в бесплатный набор ключа → пробуем следующую модель;
-// 429 — суточный/минутный лимит → отдаём ход запасным провайдерам.
+// Один ключ арены открывает все модели (Claude, GPT, Gemini, Grok…). API
+// OpenAI-совместимый: POST /v1/chat/completions с Authorization: Bearer.
+// 402 = модель не входит в бесплатный набор ключа → пробуем следующую модель;
+// 429 = лимит арены → отдаём ход запасным провайдерам.
 const COARENA_BASE = 'https://coarena.ai/api/v1'
-/** Цепочка моделей Coarena: дефолт из доков арены → новее Fable → лёгкий Haiku
- *  (меняется секретом COARENA_MODEL, например на gemini-4-argon) */
-export const COARENA_CHAIN = ['claude-fable-5-2', 'claude-haiku-5-5']
+/** Цепочка моделей Coarena — бесплатный набор free-аккаунта (проверено в проде
+ *  2026-11-18: ответ 402 перечисляет именно их). GPT-6 Luna — первая в списке
+ *  арены; при пополнении баланса секрет COARENA_MODEL открывает любую модель
+ *  (claude-fable-5, gpt-6-2-astra, gemini-4-argon…). */
+export const COARENA_CHAIN = ['gemini-3-8-flash', 'deepseek-v4-1-flash-1017']
 
 // Предохранитель Coarena — как у Gemini: заболела арена → 3 минуты сразу
 // запасные провайдеры (состояние живёт в изоляте воркера, защита best effort).
@@ -808,7 +811,7 @@ export async function askLLM(history, opts = {}) {
   // пробуем следующую модель цепочки; 429 = лимит арены → отдаём ход запасным.
   const coarenaKey = opts.coarenaKey || ''
   if (coarenaKey && Date.now() >= coarenaBreaker.skipUntil) {
-    const models = [...new Set([opts.coarenaModel || 'claude-fable-5', ...COARENA_CHAIN])]
+    const models = [...new Set([opts.coarenaModel || 'gpt-6-luna', ...COARENA_CHAIN])]
     for (const model of models) {
       try {
         const res = await fetch(`${COARENA_BASE}/chat/completions`, {

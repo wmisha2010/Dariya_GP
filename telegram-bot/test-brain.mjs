@@ -604,7 +604,7 @@ console.log('── askLLM: Coarena — главный мозг (v0.3.16) ──
     check('запрос ушёл в coarena.ai/api/v1/chat/completions', (calls[0]?.url || '').includes('coarena.ai/api/v1/chat/completions'))
     check('ключ в Authorization: Bearer', calls[0]?.init?.headers?.Authorization === 'Bearer ck')
     const body = JSON.parse(calls[0]?.init?.body || '{}')
-    check('первая модель — claude-fable-5 (дефолт из доков арены)', body.model === 'claude-fable-5')
+    check('первая модель — gpt-6-luna (бесплатный набор free-аккаунта)', body.model === 'gpt-6-luna')
     check('system-промпт на месте', body.messages?.[0]?.role === 'system' && /Дария/.test(body.messages[0].content))
   } finally {
     globalThis.fetch = realFetch
@@ -651,8 +651,8 @@ console.log('── askLLM: Coarena — главный мозг (v0.3.16) ──
   try {
     const reply = await askLLM([{ role: 'user', content: 'привет' }], { coarenaKey: 'ck', openrouterKey: 'or' })
     check('Coarena 402 на всех моделях → ответ из OpenRouter', reply === 'Ответ OpenRouter')
-    check('перебрали цепочку: fable-5 → fable-5-2 → haiku-5-5',
-      models.join(',') === 'claude-fable-5,claude-fable-5-2,claude-haiku-5-5')
+    check('перебрали цепочку: gpt-6-luna → gemini-3-8-flash → deepseek',
+      models.join(',') === 'gpt-6-luna,gemini-3-8-flash,deepseek-v4-1-flash-1017')
   } finally {
     globalThis.fetch = realFetch
     console.error = realErr
@@ -668,7 +668,7 @@ console.log('── askLLM: Coarena — главный мозг (v0.3.16) ──
   globalThis.fetch = async (url, init) => {
     if (String(url).includes('coarena')) {
       const model = String(JSON.parse(String(init.body)).model)
-      if (model === 'claude-fable-5') return new Response('{"error":{"code":402}}', { status: 402 })
+      if (model === 'gpt-6-luna') return new Response('{"error":{"code":402}}', { status: 402 })
       return new Response(
         JSON.stringify({ choices: [{ message: { content: 'Ответ второй модели Coarena' } }] }),
         { headers: { 'content-type': 'application/json' } },

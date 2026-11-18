@@ -46,7 +46,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.16 (brain v3.3)'
+const VERSION = 'v0.3.17 (brain v3.3)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -202,7 +202,7 @@ async function handleStatus(env: Env): Promise<Response> {
     if (env.GEMINI_API_KEY) backups.push(/^sk-/.test(env.GEMINI_API_KEY) ? 'Gemini-мост' : 'Gemini')
     if (env.OPENROUTER_API_KEY) backups.push('OpenRouter')
     brainLine =
-      `<p>Мозг: подключён ✅ <small>(Coarena — главный: ${env.COARENA_MODEL || 'claude-fable-5'}` +
+      `<p>Мозг: подключён ✅ <small>(Coarena — главный: ${env.COARENA_MODEL || 'gpt-6-luna'}` +
       `${backups.length ? ' + запасные: ' + backups.join(', ') : ''})</small></p>`
   } else if (env.GEMINI_API_KEY) {
     const model = env.GEMINI_MODEL ? ': ' + env.GEMINI_MODEL : ''
@@ -334,7 +334,7 @@ async function handleLlmTest(url: URL, env: Env): Promise<Response> {
         method: 'POST',
         headers: { Authorization: `Bearer ${coKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: env.COARENA_MODEL || 'claude-fable-5',
+          model: env.COARENA_MODEL || 'gpt-6-luna',
           messages: [{ role: 'user', content: 'Скажи «привет» одним словом' }],
           max_tokens: 16,
         }),

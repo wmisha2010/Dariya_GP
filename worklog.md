@@ -1004,3 +1004,18 @@ HTML страниц — свежий (вместе с выключателем) 
   предохранитель ×3), tsc чисто. README: переменные окружения и шаг 4 обновлены.
 - Владелец ещё не вписал COARENA_API_KEY в Cloudflare: пока Дария живёт на Gemini/OpenRouter
   как раньше (Coarena включается сама, когда секрет добавлен и нажат Deploy).
+- 2026-11-18: владелец вписал COARENA_API_KEY и нажал Deploy; прод подтвердил: coarenaKey ok
+  (план free, баланс $0, дневной бесплатный лимит $1, скидка 40%), но coarenaTest → 402
+  payment_required: «Claude Fable 5 is not part of the free tier. Free accounts can use
+  GPT-6 Luna, Gemini 3.8 Flash and DeepSeek V4.1 Flash 1017».
+
+## v0.3.17 (2026-11-18) — цепочка Coarena переставлена на бесплатный набор free-аккаунта
+- Дефолтная цепочка v0.3.16 была из платных Claude-моделей — на free-тарифе все три давали
+  бы 402 и мозг каждый раз отваливался к OpenRouter, не используя Coarena вообще.
+- Новая цепочка (ровно бесплатные модели из текста 402): gpt-6-luna → gemini-3-8-flash →
+  deepseek-v4-1-flash-1017. COARENA_MODEL по-прежнему перекрывает дефолт — при пополнении
+  баланса арены (coarena.ai/account/api/billing) владелец может поставить claude-fable-5
+  или другую платную модель. Дневной бесплатный лимит арены $1 — для чат-бота с запасом.
+- index.ts: VERSION v0.3.17 (brain v3.3); статус-страница и /llm-test.coarenaTest показали
+  новый дефолт. README: COARENA_MODEL — free-набор перечислен.
+- Тесты 152/152 (ожидания цепочки обновлены), tsc чисто.
