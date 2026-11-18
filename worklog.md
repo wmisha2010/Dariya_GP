@@ -976,3 +976,31 @@ HTML страниц — свежий (вместе с выключателем) 
   Локальный main выровнен с GitHub (истории расходились — UUID-снапшоты vs подписанные
   коммиты); лишние для репо файлы (.env, db, модели, скриншоты) остались локально, в пуш
   не попали (проверено сканом на секреты).
+
+## v0.3.16 (2026-11-18) — новый главный мозг: Coarena (один ключ — вся арена моделей)
+- Владелец попросил «поставить другой мозг, у меня есть апи» и назвал сервис: Coarena
+  (coarena.ai). Изучены открытые доки арены: OpenAI-совместимый API —
+  POST https://coarena.ai/api/v1/chat/completions, авторизация Authorization: Bearer;
+  GET /api/v1/models без ключа (в арена 20 моделей: claude-fable-5/5.1/5.2, haiku-5-5,
+  opus-5-5, sonnet-5-5, gpt-6.x, gemini-4, grok-4-7, kimi…); 402 = модель не в бесплатном
+  наборе ключа, 429 = суточный/минутный лимит (в ответе error.limit_increase).
+- brain v3.3 — цепочка: Coarena (главный) → Gemini через мост (запасной №1) → OpenRouter
+  (запасной №2). Coarena-клиент: model + messages (system-персона + история),
+  temperature 0.9, max_tokens 500, timeout 20 с на модель; пустой ответ после
+  stripToolCallMarkup → следующая модель цепочки.
+- Цепочка моделей Coarena: opts.coarenaModel || claude-fable-5 (дефолт из доков арены)
+  → claude-fable-5-2 → claude-haiku-5-5; секрет COARENA_MODEL перекрывает дефолт.
+- НОВОЕ — предохранитель Coarena (симметрично Gemini): 2 подряд полных провала →
+  3 минуты сразу запасные; сброс при успехе; resetCoarenaBreaker() для тестов.
+- NO_BRAIN-заглушки упомянуты все три провайдера («ни Coarena, ни запасные Gemini и
+  OpenRouter не ответили — суточные лимиты или спящий мост»).
+- index.ts: VERSION v0.3.16 (brain v3.3); Env += COARENA_API_KEY/COARENA_MODEL; статус-страница:
+  «Coarena — главный: <модель> + запасные: …» (Gemini-мост/Gemini/OpenRouter перечисляются
+  по наличию), пустая ветка «НЕ подключён» теперь советует COARENA_API_KEY; /llm-test:
+  coarenaKey (проверка ключа через GET /api/v1/credits — план/баланс) и coarenaTest
+  (мини-прогон той же модели, статус + код ошибки), полный прогон мозга передаёт Coarena.
+- Тесты 152/152 (+13: Coarena жив ×5, приоритет над Gemini, 402 на всех моделях → OpenRouter
+  + порядок цепочки, 402 на первой → вторая отвечает, COARENA_MODEL перекрывает дефолт,
+  предохранитель ×3), tsc чисто. README: переменные окружения и шаг 4 обновлены.
+- Владелец ещё не вписал COARENA_API_KEY в Cloudflare: пока Дария живёт на Gemini/OpenRouter
+  как раньше (Coarena включается сама, когда секрет добавлен и нажат Deploy).

@@ -8,7 +8,7 @@
 ## Что умеет
 
 - 💬 **Свободное общение** — тот же характер, что у голосовой Дарии (через
-  OpenRouter/Gemini; если ключей нет — вежливо скажет, что мозг не подключен).
+  Coarena → Gemini → OpenRouter; если ключей нет — вежливо скажет, что мозг не подключен).
 - ⚡ **Быстрые ответы без ИИ-ключей** — привет, как дела, кто ты, время, дата, помощь.
 - 🎵 **Медиа-команды** — «включи радио/музыку» → даёт ссылку на веб-версию
   с плеером (в Telegram фоновый плеер невозможен); ютуб-ссылки распознаёт и
@@ -55,8 +55,9 @@
 2. **Add variable**: тип **Secret**, имя `TELEGRAM_BOT_TOKEN`, значение — токен
    из шага 1. Сохранить → воркер перезапустится.
 
-*(опционально, для «умных» ответов: так же добавьте `OPENROUTER_API_KEY` —
-ключ с openrouter.ai/keys, или `GEMINI_API_KEY` — с aistudio.google.com/apikey)*
+*(опционально, для «умных» ответов: так же добавьте `COARENA_API_KEY` — ключ с
+coarena.ai/account/api, или `OPENROUTER_API_KEY` — ключ с openrouter.ai/keys,
+или `GEMINI_API_KEY` — с aistudio.google.com/apikey)*
 
 ### Шаг 5. Включите webhook (1 мин)
 
@@ -83,10 +84,13 @@ https://daria-bot.<ваш-поддомен>.workers.dev/setup?bot_token=ВАШ_�
 | Переменная | Обязательна | Зачем |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | ✅ | токен от @BotFather |
-| `OPENROUTER_API_KEY` | — | мозг для свободных тем (основной) |
-| `OPENROUTER_MODEL` | — | своя модель (по умолч. `poolside/laguna-s-2.1:free`) |
-| `GEMINI_API_KEY` | — | запасной мозг (Google Gemini) |
-| `GEMINI_BASE_URL` | — | релей для Gemini при гео-блоке |
+| `COARENA_API_KEY` | — | главный мозг (coarena.ai — один ключ, любая модель арены) |
+| `COARENA_MODEL` | — | своя модель (по умолч. `claude-fable-5`) |
+| `GEMINI_API_KEY` | — | запасной мозг №1 (Google Gemini / мост gemini-web2api) |
+| `GEMINI_BASE_URL` | — | адрес моста gemini-web2api (туннеля) |
+| `GEMINI_MODEL` | — | своя модель Gemini (по умолч. `gemini-3.6-flash`) |
+| `OPENROUTER_API_KEY` | — | запасной мозг №2 (openrouter.ai, бесплатные модели) |
+| `OPENROUTER_MODEL` | — | своя модель OpenRouter |
 | `WEB_APP_URL` | — | ссылка, которую бот даёт на веб-версию с плеером |
 | `TIMEZONE` | — | часовой пояс для «который час» (по умолч. Europe/Moscow) |
 
@@ -96,7 +100,7 @@ https://daria-bot.<ваш-поддомен>.workers.dev/setup?bot_token=ВАШ_�
 telegram-bot/
 ├── src/index.ts     # воркер: /setup, /telegram-webhook, статус-страница
 ├── src/brain.js     # мозг: триггеры, интенты, персона, LLM-клиент
-├── test-brain.mjs   # 36 тестов мозга (npm test)
+├── test-brain.mjs   # тесты мозга (npm test)
 ├── wrangler.toml    # конфиг Cloudflare Workers
 └── package.json
 ```

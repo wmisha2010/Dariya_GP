@@ -5,12 +5,13 @@
  *   GET  /                      — статус-страница (жив ли воркер и webhook);
  *   GET  /setup?bot_token=...   — регистрация webhook у Telegram (одноразово);
  *   GET  /search-test?q=...     — диагностика веб-поиска;
- *   GET  /llm-test[&text=...]   — диагностика «мозга»: ключ Gemini, регион выхода, живой ответ;
+ *   GET  /llm-test[&text=...]   — диагностика «мозга»: ключи Coarena/Gemini, регион выхода, живой ответ;
  *   POST /telegram-webhook      — приём апдейтов от Telegram.
  *
  * Секреты (Dashboard → Worker → Settings → Variables and Secrets):
  *   TELEGRAM_BOT_TOKEN — токен от @BotFather (обязателен);
- *   GEMINI_API_KEY — главный мозг, OPENROUTER_API_KEY — запасной (опционально);
+ *   COARENA_API_KEY — главный мозг (coarena.ai), GEMINI_API_KEY — через мост,
+ *   OPENROUTER_API_KEY — запасной (все три опциональны);
  *   WEB_APP_URL — ссылка на веб-версию с плеером (по умолчанию — превью-песочница).
  */
 
@@ -30,6 +31,8 @@ import {
 
 export interface Env {
   TELEGRAM_BOT_TOKEN: string
+  COARENA_API_KEY?: string
+  COARENA_MODEL?: string
   OPENROUTER_API_KEY?: string
   OPENROUTER_MODEL?: string
   GEMINI_API_KEY?: string
@@ -43,7 +46,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.15 (brain v3.2)'
+const VERSION = 'v0.3.16 (brain v3.3)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -134,7 +137,7 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
     return
   }
 
-  // 2) Свободные темы — через LLM (Gemini → OpenRouter)
+  // 2) Свободные темы — через LLM (Coarena → Gemini → OpenRouter)
   const history = chatHistory.get(chatId) ?? []
   const prevUserTexts = history.filter((h) => h.role === 'user').map((h) => h.content).slice(-4)
   history.push({ role: 'user', content: text }) // в контекст — исходная фраза
@@ -153,6 +156,8 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   }
 
   const llmText = await askLLM(history, {
+    coarenaKey: env.COARENA_API_KEY || '',
+    coarenaModel: env.COARENA_MODEL || '',
     openrouterKey: env.OPENROUTER_API_KEY || '',
     openrouterModel: env.OPENROUTER_MODEL || '',
     geminiKey: env.GEMINI_API_KEY || '',
@@ -190,9 +195,16 @@ async function handleStatus(env: Env): Promise<Response> {
       webhookInfo = '<p>getWebhookInfo: недоступен</p>'
     }
   }
-  // Строка «Мозг»: различаем три состояния, чтобы хозяин видел, чего не хватает
+  // Строка «Мозг»: различаем состояния, чтобы хозяин видел, чего не хватает
   let brainLine: string
-  if (env.GEMINI_API_KEY) {
+  if (env.COARENA_API_KEY) {
+    const backups: string[] = []
+    if (env.GEMINI_API_KEY) backups.push(/^sk-/.test(env.GEMINI_API_KEY) ? 'Gemini-мост' : 'Gemini')
+    if (env.OPENROUTER_API_KEY) backups.push('OpenRouter')
+    brainLine =
+      `<p>Мозг: подключён ✅ <small>(Coarena — главный: ${env.COARENA_MODEL || 'claude-fable-5'}` +
+      `${backups.length ? ' + запасные: ' + backups.join(', ') : ''})</small></p>`
+  } else if (env.GEMINI_API_KEY) {
     const model = env.GEMINI_MODEL ? ': ' + env.GEMINI_MODEL : ''
     const spare = env.OPENROUTER_API_KEY ? ' + запасной OpenRouter' : ''
     const via = env.GEMINI_BASE_URL
@@ -204,7 +216,7 @@ async function handleStatus(env: Env): Promise<Response> {
   } else if (env.OPENROUTER_API_KEY) {
     brainLine = `<p>Мозг: подключён ✅ <small>(OpenRouter — основной мозг: ${env.OPENROUTER_MODEL || 'по умолчанию'})</small></p>`
   } else {
-    brainLine = '<p>Мозг: НЕ подключён 😴 — добавьте секрет GEMINI_API_KEY или OPENROUTER_API_KEY</p>'
+    brainLine = '<p>Мозг: НЕ подключён 😴 — добавьте секрет COARENA_API_KEY (или GEMINI_API_KEY / OPENROUTER_API_KEY)</p>'
   }
   return html([
     '<h1>Дария-бот жива 😏</h1>',
@@ -297,6 +309,52 @@ async function handleLlmTest(url: URL, env: Env): Promise<Response> {
     }
   } catch (e: any) {
     out.egress = { error: String(e?.message || e) }
+  }
+
+  // Coarena жив? Ключ проверяем лёгким запросом /credits (план и баланс арены),
+  // затем мини-прогон модели с тем же именем, что у мозга — увидим настоящий код
+  // ошибки: 401 (ключ не принят), 402 (модель не в бесплатном наборе), 429 (лимит)
+  const coKey = env.COARENA_API_KEY || ''
+  if (coKey) {
+    try {
+      const cr = await fetch('https://coarena.ai/api/v1/credits', {
+        headers: { Authorization: `Bearer ${coKey}` },
+        signal: AbortSignal.timeout(8000),
+      })
+      const cj: any = await cr.json().catch(() => ({}))
+      out.coarenaKey = cr.ok
+        ? { ok: true, credits: cj }
+        : { ok: false, status: cr.status, message: String(cj?.error?.message || JSON.stringify(cj)).slice(0, 200) }
+    } catch (e: any) {
+      out.coarenaKey = { ok: false, error: String(e?.message || e) }
+    }
+    try {
+      const t0 = Date.now()
+      const r = await fetch('https://coarena.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${coKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: env.COARENA_MODEL || 'claude-fable-5',
+          messages: [{ role: 'user', content: 'Скажи «привет» одним словом' }],
+          max_tokens: 16,
+        }),
+        signal: AbortSignal.timeout(15000),
+      })
+      const j: any = await r.json().catch(() => ({}))
+      out.coarenaTest = r.ok
+        ? { ok: true, model: j?.model || '', ms: Date.now() - t0 }
+        : {
+            ok: false,
+            status: r.status,
+            code: String(j?.error?.code ?? ''),
+            message: String(j?.error?.message || JSON.stringify(j?.error ?? j)).slice(0, 300),
+            ms: Date.now() - t0,
+          }
+    } catch (e: any) {
+      out.coarenaTest = { ok: false, error: String(e?.message || e) }
+    }
+  } else {
+    out.coarenaKey = { ok: false, error: 'секрет COARENA_API_KEY не задан' }
   }
 
   // Ключ Gemini жив? (список моделей — лёгкий запрос, полный ответ см. ?text=)
@@ -417,6 +475,8 @@ async function handleLlmTest(url: URL, env: Env): Promise<Response> {
     const reply = await askLLM(
       [{ role: 'user', content: text }],
       {
+        coarenaKey: env.COARENA_API_KEY || '',
+        coarenaModel: env.COARENA_MODEL || '',
         openrouterKey: env.OPENROUTER_API_KEY || '',
         openrouterModel: env.OPENROUTER_MODEL || '',
         geminiKey,

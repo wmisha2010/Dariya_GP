@@ -9,8 +9,8 @@
  *    БЕЗ ИИ-ключей — в характере Дарии;
  *  - веб-поиск (DuckDuckGo) для свежих данных: погода, новости, курсы —
  *    результаты подмешиваются в контекст LLM;
- *  - всё остальное → LLM (Gemini — главный мозг, OpenRouter — запасной);
- *    без ключей — вежливая заглушка.
+ *  - всё остальное → LLM (Coarena — главный мозг, Gemini через мост и
+ *    OpenRouter — запасные); без ключей — вежливая заглушка.
  *
  * Файл намеренно на чистом JS без импортов: тестируется в node (test-brain.mjs)
  * и бандлится wrangler'ом без настройки.
@@ -140,8 +140,8 @@ const MEDIA_YOUTUBE = [
   'Без ссылки не играю 😄 Кинь ютуб-линк, или заходи в веб-версию:',
 ]
 export const NO_BRAIN = [
-  'Мозг сегодня молчит — ни Gemini, ни запасной OpenRouter не ответили 😅 Чаще всего это лимиты бесплатных моделей или спящий мост. Хозяину: повтори через минуту.',
-  'Хотела ответить умно, но мозг промолчал 😄 Хозяину намёк: у бесплатных моделей OpenRouter суточные лимиты, а мост Gemini мог быть выключен — попробуй позже.',
+  'Мозг сегодня молчит — ни Coarena, ни запасные Gemini и OpenRouter не ответили 😅 Чаще всего это суточные лимиты бесплатных моделей или спящий мост. Хозяину: повтори через минуту.',
+  'Хотела ответить умно, но мозг промолчал 😄 Хозяину намёк: дневной лимит Coarena мог кончиться, у бесплатных моделей OpenRouter свои лимиты, а мост Gemini мог быть выключен — попробуй позже.',
 ]
 
 export function formatTime(tz = 'Europe/Moscow') {
@@ -729,7 +729,7 @@ export const SYSTEM_PROMPT = [
   'Если просят помощь по музыке: у тебя нет плеера в Telegram, радио и музыка живут в твоей веб-версии.',
 ].join(' ')
 
-// ── LLM: Gemini (главный) → OpenRouter (запасной) ───────────────────────
+// ── LLM: Coarena (главный) → Gemini (мост) → OpenRouter (запасной) ──────
 // Живая цепочка бесплатных моделей (проверено по каталогу OpenRouter 2026-11-02):
 // poolside/laguna-s-2.1:free умерла (404 мгновенно), dots-3-note-preview выброшена —
 // она же источник сырых <dots_function_call> в чате
@@ -741,6 +741,27 @@ export const OPENROUTER_CHAIN = [
 /** Цепочка имён Gemini: основная → алиасы (несуществующее имя даёт быстрый 404 — идём дальше).
  *  gemini-3.6-flash и gemini-3.5-flash-lite — имена моделей моста gemini-web2api (есть и в официальном API) */
 const GEMINI_FALLBACKS = ['gemini-3.5-flash-lite', 'gemini-flash-latest', 'gemini-2.5-flash']
+
+// ── Coarena: главный мозг (coarena.ai, OpenAI-совместимый API) ───────────
+// Один ключ арены открывает все модели (Claude, GPT, Gemini, Grok…). Ошибки:
+// 402 — модель не входит в бесплатный набор ключа → пробуем следующую модель;
+// 429 — суточный/минутный лимит → отдаём ход запасным провайдерам.
+const COARENA_BASE = 'https://coarena.ai/api/v1'
+/** Цепочка моделей Coarena: дефолт из доков арены → новее Fable → лёгкий Haiku
+ *  (меняется секретом COARENA_MODEL, например на gemini-4-argon) */
+export const COARENA_CHAIN = ['claude-fable-5-2', 'claude-haiku-5-5']
+
+// Предохранитель Coarena — как у Gemini: заболела арена → 3 минуты сразу
+// запасные провайдеры (состояние живёт в изоляте воркера, защита best effort).
+const coarenaBreaker = { fails: 0, skipUntil: 0 }
+const COARENA_BREAKER_AFTER = 2
+const COARENA_BREAKER_COOLDOWN_MS = 3 * 60 * 1000
+
+/** Сброс предохранителя Coarena — для тестов (test-brain.mjs). */
+export function resetCoarenaBreaker() {
+  coarenaBreaker.fails = 0
+  coarenaBreaker.skipUntil = 0
+}
 
 // ── Предохранитель Gemini ────────────────────────────────────────────────
 // Зависший/больной мост не должен съедать 20 секунд на КАЖДОМ сообщении:
@@ -781,9 +802,62 @@ export async function askLLM(history, opts = {}) {
   }
   if (webContext) system += `\n\n${webContext}`
 
-  // Gemini — главный мозг: заметно умнее бесплатных моделей OpenRouter и не
-  // страдает ложными вызовами инструментов. Перебираем имена моделей: если
-  // конкретное устарело (HTTP 404), пробуем следующее из цепочки.
+  // Coarena — главный мозг: один ключ открывает все модели арены (Claude, GPT,
+  // Gemini, Grok…). API OpenAI-совместимый: POST /v1/chat/completions с
+  // Authorization: Bearer. 402 = модель не входит в бесплатный набор ключа →
+  // пробуем следующую модель цепочки; 429 = лимит арены → отдаём ход запасным.
+  const coarenaKey = opts.coarenaKey || ''
+  if (coarenaKey && Date.now() >= coarenaBreaker.skipUntil) {
+    const models = [...new Set([opts.coarenaModel || 'claude-fable-5', ...COARENA_CHAIN])]
+    for (const model of models) {
+      try {
+        const res = await fetch(`${COARENA_BASE}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${coarenaKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: 'system', content: system }, ...history],
+            temperature: 0.9,
+            max_tokens: 500,
+          }),
+          // 20 с на модель: арена не должна съесть весь 30-секундный фон Telegram
+          signal: AbortSignal.timeout(20000),
+        })
+        if (res.ok) {
+          const data = await res.json()
+          const raw = data?.choices?.[0]?.message?.content?.trim()
+          const text = stripToolCallMarkup(raw)
+          if (text) {
+            coarenaBreaker.fails = 0 // успех — сбрасываем счётчик провалов
+            return text
+          }
+          console.error(`[coarena] ${model}: пустой ответ после зачистки`)
+        } else {
+          const err = await res.text().catch(() => '')
+          console.error(`[coarena] ${model}: HTTP ${res.status} ${err.slice(0, 200)}`)
+        }
+      } catch (e) {
+        console.error(`[coarena] ${model}: ${e?.message || e}`)
+      }
+    }
+    // Дошли до конца цикла — ни одна модель не ответила, учитываем провал
+    coarenaBreaker.fails += 1
+    if (coarenaBreaker.fails >= COARENA_BREAKER_AFTER) {
+      console.error(
+        `[coarena] ${COARENA_BREAKER_AFTER} провала подряд — ${COARENA_BREAKER_COOLDOWN_MS / 1000} с отвечаем через запасных`,
+      )
+      coarenaBreaker.fails = 0
+      coarenaBreaker.skipUntil = Date.now() + COARENA_BREAKER_COOLDOWN_MS
+    }
+  }
+
+  // Gemini — запасной мозг №1 (когда Coarena не задан или упал): заметно
+  // умнее бесплатных моделей OpenRouter и не страдает ложными вызовами
+  // инструментов. Перебираем имена моделей: если конкретное устарело
+  // (HTTP 404), пробуем следующее из цепочки.
   //
   // Ключ sk-gemini-… — это ключ моста gemini-web2api: напрямую в Google он НЕ
   // работает. Если GEMINI_BASE_URL не задан (мост ещё не подключён), не долбим

@@ -23,6 +23,7 @@ import {
   withCityContext,
   timeLookup,
   resetGeminiBreaker,
+  resetCoarenaBreaker,
 } from './src/brain.js'
 
 let passed = 0
@@ -583,6 +584,161 @@ console.log('── askLLM: Gemini главный, OpenRouter запасной �
 {
   const noKeys = await askLLM([{ role: 'user', content: 'привет' }], {})
   check('без ключей → null (в чат уйдёт NO_BRAIN)', noKeys === null)
+}
+
+console.log('── askLLM: Coarena — главный мозг (v0.3.16) ──')
+{
+  resetCoarenaBreaker()
+  const realFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init })
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: 'Ответ Coarena' } }] }),
+      { headers: { 'content-type': 'application/json' } },
+    )
+  }
+  try {
+    const reply = await askLLM([{ role: 'user', content: 'привет' }], { coarenaKey: 'ck' })
+    check('Coarena отвечает, пока жива', reply === 'Ответ Coarena')
+    check('запрос ушёл в coarena.ai/api/v1/chat/completions', (calls[0]?.url || '').includes('coarena.ai/api/v1/chat/completions'))
+    check('ключ в Authorization: Bearer', calls[0]?.init?.headers?.Authorization === 'Bearer ck')
+    const body = JSON.parse(calls[0]?.init?.body || '{}')
+    check('первая модель — claude-fable-5 (дефолт из доков арены)', body.model === 'claude-fable-5')
+    check('system-промпт на месте', body.messages?.[0]?.role === 'system' && /Дария/.test(body.messages[0].content))
+  } finally {
+    globalThis.fetch = realFetch
+    resetCoarenaBreaker()
+  }
+}
+{
+  // Coarena стоит впереди Gemini, когда заданы оба ключа
+  resetCoarenaBreaker()
+  const realFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: 'Ответ Coarena' } }] }),
+      { headers: { 'content-type': 'application/json' } },
+    )
+  }
+  try {
+    const reply = await askLLM([{ role: 'user', content: 'привет' }], { coarenaKey: 'ck', geminiKey: 'gk' })
+    check('Coarena впереди Gemini', reply === 'Ответ Coarena' && calls.every((u) => u.includes('coarena')))
+  } finally {
+    globalThis.fetch = realFetch
+    resetCoarenaBreaker()
+  }
+}
+{
+  // 402 (модель не в бесплатном наборе ключа) на всех моделях → запасной мозг
+  resetCoarenaBreaker()
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  const models = []
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('coarena')) {
+      models.push(String(JSON.parse(String(init.body)).model))
+      return new Response('{"error":{"code":402,"message":"payment required"}}', { status: 402 })
+    }
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: 'Ответ OpenRouter' } }] }),
+      { headers: { 'content-type': 'application/json' } },
+    )
+  }
+  try {
+    const reply = await askLLM([{ role: 'user', content: 'привет' }], { coarenaKey: 'ck', openrouterKey: 'or' })
+    check('Coarena 402 на всех моделях → ответ из OpenRouter', reply === 'Ответ OpenRouter')
+    check('перебрали цепочку: fable-5 → fable-5-2 → haiku-5-5',
+      models.join(',') === 'claude-fable-5,claude-fable-5-2,claude-haiku-5-5')
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+    resetCoarenaBreaker()
+  }
+}
+{
+  // 402 только на первой модели: вторая цепочки отвечает без фолбэка
+  resetCoarenaBreaker()
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('coarena')) {
+      const model = String(JSON.parse(String(init.body)).model)
+      if (model === 'claude-fable-5') return new Response('{"error":{"code":402}}', { status: 402 })
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: 'Ответ второй модели Coarena' } }] }),
+        { headers: { 'content-type': 'application/json' } },
+      )
+    }
+    return new Response('{}', { status: 500 })
+  }
+  try {
+    const reply = await askLLM([{ role: 'user', content: 'привет' }], { coarenaKey: 'ck' })
+    check('402 на первой модели → вторая отвечает', reply === 'Ответ второй модели Coarena')
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+    resetCoarenaBreaker()
+  }
+}
+{
+  // COARENA_MODEL перекрывает дефолтную модель
+  resetCoarenaBreaker()
+  const realFetch = globalThis.fetch
+  let firstModel = ''
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('coarena')) {
+      firstModel = firstModel || String(JSON.parse(String(init.body)).model)
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: 'Ок' } }] }),
+        { headers: { 'content-type': 'application/json' } },
+      )
+    }
+    return new Response('{}', { status: 500 })
+  }
+  try {
+    await askLLM([{ role: 'user', content: 'привет' }], { coarenaKey: 'ck', coarenaModel: 'gemini-4-argon' })
+    check('COARENA_MODEL перекрывает дефолт', firstModel === 'gemini-4-argon')
+  } finally {
+    globalThis.fetch = realFetch
+    resetCoarenaBreaker()
+  }
+}
+{
+  // Предохранитель Coarena: 2 подряд полных провала → 3 минуты сразу запасные
+  resetCoarenaBreaker()
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  let coarenaCalls = 0
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('coarena')) {
+      coarenaCalls++
+      return new Response('{"error":{"code":429,"message":"daily limit"}}', { status: 429 })
+    }
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: 'Запаска' } }] }),
+      { headers: { 'content-type': 'application/json' } },
+    )
+  }
+  try {
+    await askLLM([{ role: 'user', content: 'раз' }], { coarenaKey: 'ck', openrouterKey: 'or' })
+    const afterFirst = coarenaCalls
+    await askLLM([{ role: 'user', content: 'два' }], { coarenaKey: 'ck', openrouterKey: 'or' })
+    const afterSecond = coarenaCalls
+    const third = await askLLM([{ role: 'user', content: 'три' }], { coarenaKey: 'ck', openrouterKey: 'or' })
+    check('первые два вызова пытались в Coarena (по 3 модели)', afterFirst > 0 && afterSecond > afterFirst)
+    check('после двух полных провалов Coarena пропущена', coarenaCalls === afterSecond)
+    check('на пропуске ответ пришёл из OpenRouter', third === 'Запаска')
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+    resetCoarenaBreaker()
+  }
 }
 
 console.log(`\nИтого: ${passed} прошло, ${failed} упало`)
