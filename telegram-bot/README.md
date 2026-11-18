@@ -85,7 +85,7 @@ https://daria-bot.<ваш-поддомен>.workers.dev/setup?bot_token=ВАШ_�
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | ✅ | токен от @BotFather |
 | `COARENA_API_KEY` | — | главный мозг (coarena.ai — один ключ, любая модель арены) |
-| `COARENA_MODEL` | — | своя модель (по умолч. `gpt-6-luna`; free-набор: gpt-6-luna, gemini-3-8-flash, deepseek-v4-1-flash-1017) |
+| `COARENA_MODEL` | — | своя модель (по умолч. `deepseek-v4-1-flash-1017`; free-набор: deepseek-v4-1-flash-1017, gemini-3-8-flash, gpt-6-luna) |
 | `GEMINI_API_KEY` | — | запасной мозг №1 (Google Gemini / мост gemini-web2api) |
 | `GEMINI_BASE_URL` | — | адрес моста gemini-web2api (туннеля) |
 | `GEMINI_MODEL` | — | своя модель Gemini (по умолч. `gemini-3.6-flash`) |

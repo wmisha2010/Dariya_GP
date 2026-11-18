@@ -1019,3 +1019,12 @@ HTML страниц — свежий (вместе с выключателем) 
 - index.ts: VERSION v0.3.17 (brain v3.3); статус-страница и /llm-test.coarenaTest показали
   новый дефолт. README: COARENA_MODEL — free-набор перечислен.
 - Тесты 152/152 (ожидания цепочки обновлены), tsc чисто.
+
+## v0.3.18 (2026-11-18) — DeepSeek V4.1 Flash 1017 — первая модель Coarena (выбор владельца)
+- Владелец поправил выбор главной модели: «там должна быть модель DeepSeek V4.1 Flash 1017».
+- Дефолт и первая модель цепочки Coarena: deepseek-v4-1-flash-1017 → gemini-3-8-flash →
+  gpt-6-luna (все три — бесплатный набор free-аккаунта, порядок запасных не важен).
+  COARENA_MODEL по-прежнему перекрывает дефолт.
+- index.ts: VERSION v0.3.18 (brain v3.3); статус-страница и /llm-test.coarenaTest — новый
+  дефолт. README: COARENA_MODEL — deepseek первым в free-наборе.
+- Тесты 152/152 (ожидания цепочки: deepseek → gemini → gpt-6-luna), tsc чисто.

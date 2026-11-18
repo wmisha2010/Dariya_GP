@@ -749,10 +749,11 @@ const GEMINI_FALLBACKS = ['gemini-3.5-flash-lite', 'gemini-flash-latest', 'gemin
 // 429 = лимит арены → отдаём ход запасным провайдерам.
 const COARENA_BASE = 'https://coarena.ai/api/v1'
 /** Цепочка моделей Coarena — бесплатный набор free-аккаунта (проверено в проде
- *  2026-11-18: ответ 402 перечисляет именно их). GPT-6 Luna — первая в списке
- *  арены; при пополнении баланса секрет COARENA_MODEL открывает любую модель
- *  (claude-fable-5, gpt-6-2-astra, gemini-4-argon…). */
-export const COARENA_CHAIN = ['gemini-3-8-flash', 'deepseek-v4-1-flash-1017']
+ *  2026-11-18: ответ 402 перечисляет именно их). Дефолт и первая модель —
+ *  DeepSeek V4.1 Flash 1017 (выбор владельца); при пополнении баланса секрет
+ *  COARENA_MODEL открывает любую модель (claude-fable-5, gpt-6-2-astra,
+ *  gemini-4-argon…). */
+export const COARENA_CHAIN = ['gemini-3-8-flash', 'gpt-6-luna']
 
 // Предохранитель Coarena — как у Gemini: заболела арена → 3 минуты сразу
 // запасные провайдеры (состояние живёт в изоляте воркера, защита best effort).
@@ -811,7 +812,7 @@ export async function askLLM(history, opts = {}) {
   // пробуем следующую модель цепочки; 429 = лимит арены → отдаём ход запасным.
   const coarenaKey = opts.coarenaKey || ''
   if (coarenaKey && Date.now() >= coarenaBreaker.skipUntil) {
-    const models = [...new Set([opts.coarenaModel || 'gpt-6-luna', ...COARENA_CHAIN])]
+    const models = [...new Set([opts.coarenaModel || 'deepseek-v4-1-flash-1017', ...COARENA_CHAIN])]
     for (const model of models) {
       try {
         const res = await fetch(`${COARENA_BASE}/chat/completions`, {
