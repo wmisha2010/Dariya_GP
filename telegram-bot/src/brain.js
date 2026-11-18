@@ -165,7 +165,7 @@ const SEARCH_VERBS_RE = /(погугли|загугли|поищи|поищ|по
 const TIME_QUERY_RE = /(?:времени|время)(?:\s+[а-яё]+){0,3}\s+(?:в|во|на)\s+[а-яё]|(?:в|во|на)\s+[а-яё]+(?:\s+[а-яё]+){0,3}[\s,]*(?:времени|время)/i
 
 /** Темы, где без свежих данных нечего делать */
-const SEARCH_HINTS_RE = /погода|новост|курс [а-яё]|курс\b.*(доллар|евро|рубл|биткоин|юан)|доллар.*(подорожал|подешевел|курс)|биткоин|эфириум|крипт|кто победил|сч[её]т матча|счет матча|итог(ы)? матча|сколько (стоит|стоят)|стоимость|цена|цены на|дата выхода|когда выйдет|когда вышл[ао]|последн(ие|яя) (новост|серия|сезон|версия|релиз|обновлени)|свеж(ие|ая) новост|тренд|расписание|премьер[аы]|кто такой|кто такая|праздник|выходн|отмеча|какой сегодня|какое сегодня|какой сейчас|какое сейчас|какой (день|год|число)|что (сегодня|сейчас) (в россии|в мире|происходит)|(?:сколько\s+)?времени\s+в\s+[а-яё]|время\s+в\s+[а-яё]/i
+const SEARCH_HINTS_RE = /погода|новост|курс [а-яё]|курс\b.*(доллар|евро|рубл|биткоин|юан)|доллар.*(подорожал|подешевел|курс)|биткоин|эфириум|крипт|кто победил|сч[её]т матча|счет матча|итог(ы)? матча|сколько (стоит|стоят)|стоимость|цена|цены на|дата выхода|когда выйдет|когда вышл[ао]|последн(ие|яя) (новост|серия|сезон|версия|релиз|обновлени)|свеж(ие|ая) новост|тренд|расписание|премьер[аы]|кто такой|кто такая|праздник|выходн|отмеча|какой сегодня|какое сегодня|какой сейчас|какое сейчас|какой (день|год|число)|что (сегодня|сейчас) (в россии|в мире|происходит)|что (нового|происходит|творится|слышно)|(?:сколько\s+)?времени\s+в\s+[а-яё]|время\s+в\s+[а-яё]/i
 
 /** Нужен ли веб-поиск для этой фразы */
 export function needsWebSearch(text) {
@@ -331,6 +331,66 @@ async function wikipediaSearch(q, max) {
   }))
   if (!results.length) throw new Error('wikipedia пусто')
   return results
+}
+
+/** Новостные запросы — живая лента Google News вместо поисковиков. Без этого
+ *  пути гонку движков обычно выигрывает Википедия — и на «последние новости»
+ *  приходят энциклопедические статьи О новостях, а не сами новости
+ *  (проверено в проде 2026-11-18: «Википедия: Последние новости — газета…»). */
+export const NEWS_RE =
+  /новост|что нового|что происходит|что творится|что слышно|срочн(ые|ая|о) (новост|сообщ)/i
+
+/** Общий новостной запрос без темы («последние новости», «что происходит?»)
+ *  — берём главную ленту топ-новостей, а не поиск RSS по слову «новости» */
+const GENERIC_NEWS_RE =
+  /^(?:последние|свежие|главные|сегодняшние|срочные|топ)?\s*(?:новост[а-яё]*|события|что нового|что происходит|что творится|что слышно)\s*(?:в\s+(?:мире|россии|стране|сети|интернете)|у\s+нас)?\s*[?!.]*$/i
+
+/** Разбор RSS-ленты Google News: <item> с title «Заголовок - Источник», link, pubDate */
+export function parseNewsRss(xml, max = 6) {
+  const items = [...String(xml || '').matchAll(/<item>([\s\S]*?)<\/item>/g)]
+  const out = []
+  const dateFmt = new Intl.DateTimeFormat('ru-RU', {
+    day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow',
+  })
+  for (const it of items) {
+    if (out.length >= max) break
+    const block = it[1]
+    const pick = (tag) => {
+      const m = block.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`))
+      return m ? stripTags(m[1]) : ''
+    }
+    const rawTitle = pick('title')
+    if (!rawTitle) continue
+    // Google News складывает источник в конец заголовка: «Заголовок - Источник»
+    const dash = rawTitle.lastIndexOf(' - ')
+    const title = dash > 0 ? rawTitle.slice(0, dash) : rawTitle
+    const url = pick('link')
+    if (!/^https?:\/\//.test(url)) continue
+    const when = (() => {
+      const d = new Date(pick('pubDate'))
+      return Number.isNaN(d.getTime()) ? '' : dateFmt.format(d)
+    })()
+    const source = pick('source') || (dash > 0 ? rawTitle.slice(dash + 3) : '')
+    out.push({ title, url, snippet: [source, when].filter(Boolean).join(', '), engine: 'google-news' })
+  }
+  return out
+}
+
+/** Живые новости через RSS Google News: пустой/общий запрос — топ-лента дня,
+ *  с темой («новости футбола») — поиск по ленте. Работает из датацентра без капчи. */
+export async function newsSearch(query, max = 6) {
+  const t = (query || '').trim()
+  const url = !t || GENERIC_NEWS_RE.test(t)
+    ? 'https://news.google.com/rss?hl=ru&gl=RU&ceid=RU:ru'
+    : 'https://news.google.com/rss/search?q=' + encodeURIComponent(t) + '&hl=ru&gl=RU&ceid=RU:ru'
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'DariaBot/0.3 (personal assistant bot)' },
+    signal: AbortSignal.timeout(8000),
+  })
+  if (!res.ok) throw new Error('google-news ' + res.status)
+  const items = parseNewsRss(await res.text(), max)
+  if (!items.length) throw new Error('google-news пусто')
+  return items
 }
 
 /** Запросы про курс валют — отвечаем точными данными ЦБ РФ вместо сниппетов (сниппеты врут датой) */
@@ -554,6 +614,15 @@ export async function webSearch(query, opts = {}) {
   const key = q.toLowerCase()
   const cached = searchCache.get(key)
   if (cached && Date.now() - cached.t < SEARCH_CACHE_TTL) return cached.r
+  // Новости — приоритет: живая лента Google News, свежие заголовки с датами
+  if (NEWS_RE.test(q)) {
+    try {
+      const news = await newsSearch(q, max)
+      if (searchCache.size > 50) searchCache.clear()
+      searchCache.set(key, { r: news, t: Date.now() })
+      return news
+    } catch { /* лента не ответила — обычный поиск */ }
+  }
   // Погода — приоритет: точные данные open-meteo, если в запросе есть город
   if (WEATHER_RE.test(q) && extractWeatherCity(q)) {
     try {
@@ -616,7 +685,8 @@ export function formatSearchContext(results, query) {
   return [
     `[Результаты веб-поиска по запросу «${query}» — выдача свежая, но в сниппетах бывают старые данные: если указана дата, считай её датой информации]`,
     ...lines,
-    'Опирайся на эти данные и можешь упомянуть, что только что погуглила.',
+    'Опирайся на эти данные, когда они относятся к вопросу, и можешь упомянуть, что только что погуглила.',
+    'Если результаты не относятся к вопросу собеседника (болтовня, а не факт про мир) — игнорируй их и отвечай как обычно.',
     'Цифры, имена и даты из блока передавай ДОСЛОВНО — не выдумывай, не меняй и не «округляй» числа.',
     'Если данных мало или они противоречивы — честно скажи, что не нашла надёжного ответа.',
   ].join('\n')

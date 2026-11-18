@@ -10,6 +10,8 @@ import {
   askLLM,
   needsWebSearch,
   buildSearchQuery,
+  newsSearch,
+  parseNewsRss,
   parseDdgHtml,
   parseDdgLiteHtml,
   parseBingHtml,
@@ -431,6 +433,57 @@ console.log('── buildSearchQuery: «посмотри в сети …» ─�
     buildSearchQuery('посмотри в сети в Ачинске сколько время') === 'в Ачинске сколько время')
   check('срезаем «глянь в яндексе»',
     buildSearchQuery('глянь в яндексе новости про радио') === 'новости про радио')
+}
+
+console.log('── Новости: Google News RSS вместо статей Википедии ──')
+{
+  // Фразы, которые раньше проскакивали мимо триггера (претензия владельца)
+  check('«что нового?» → поиск', needsWebSearch('что нового?') === true)
+  check('«что происходит в мире» → поиск', needsWebSearch('что происходит в мире') === true)
+  check('«что творится в мире» → поиск', needsWebSearch('что творится в мире') === true)
+  check('«что слышно?» → поиск', needsWebSearch('что слышно?') === true)
+
+  // Разбор RSS-ленты Google News: «Заголовок - Источник», link, pubDate
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Top Stories</title>
+<item><title>Срочный заголовок первый - РИА Новости</title><link>https://news.google.com/rss/articles/a?oc=5</link><pubDate>Tue, 17 Nov 2026 18:30:00 GMT</pubDate><source url="https://ria.ru">РИА Новости</source></item>
+<item><title>Второй заголовок - ТАСС</title><link>https://news.google.com/rss/articles/b?oc=5</link><pubDate>Wed, 18 Nov 2026 08:00:00 GMT</pubDate></item>
+<item><title>Без ссылки</title></item>
+</channel></rss>`
+  const items = parseNewsRss(xml, 6)
+  check('parseNewsRss: 2 валидных item из 3', items.length === 2)
+  check('parseNewsRss: источник отрезан от заголовка', items[0].title === 'Срочный заголовок первый')
+  check('parseNewsRss: engine = google-news', items.every((r) => r.engine === 'google-news'))
+  check('parseNewsRss: источник в сниппете', items[0].snippet.includes('РИА Новости'))
+  check('parseNewsRss: источник из хвоста заголовка (без <source>)', items[1].snippet.includes('ТАСС'))
+  check('parseNewsRss: дата из pubDate в сниппете', /[0-9]{2}:[0-9]{2}/.test(items[0].snippet))
+}
+{
+  // newsSearch: общий запрос → главная лента, с темой → поиск по ленте
+  const realFetch = globalThis.fetch
+  const urls = []
+  globalThis.fetch = async (url) => {
+    urls.push(String(url))
+    return new Response(
+      '<rss><channel><item><title>Живой заголовок - Лента</title><link>https://news.google.com/x?oc=5</link><pubDate>Wed, 18 Nov 2026 09:00:00 GMT</pubDate></item></channel></rss>',
+      { headers: { 'content-type': 'application/rss+xml' } },
+    )
+  }
+  try {
+    const top = await newsSearch('последние новости')
+    check('newsSearch: общий запрос → главная лента топ-новостей',
+      urls[0] === 'https://news.google.com/rss?hl=ru&gl=RU&ceid=RU:ru')
+    check('newsSearch: разобрал живой заголовок', top[0].title === 'Живой заголовок')
+    const themed = await newsSearch('новости футбола')
+    check('newsSearch: тема → поиск по ленте',
+      urls[1].startsWith('https://news.google.com/rss/search?q=') && urls[1].includes('%D1%84'))
+    check('newsSearch: тема вернула результат', themed.length === 1)
+    const viaWeb = await webSearch('свежие новости в мире ' + Date.now())
+    check('webSearch: новостной запрос идёт в Google News, не в Википедию',
+      viaWeb.length === 1 && viaWeb[0].engine === 'google-news' && urls.every((u) => !u.includes('wikipedia')))
+  } finally {
+    globalThis.fetch = realFetch
+  }
 }
 
 console.log('── Быстрое время на голое «Время» ──')

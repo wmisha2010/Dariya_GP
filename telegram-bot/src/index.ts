@@ -21,7 +21,6 @@ import {
   askLLM,
   NO_BRAIN,
   OPENROUTER_CHAIN,
-  needsWebSearch,
   webSearch,
   formatSearchContext,
   buildSearchQuery,
@@ -46,7 +45,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.18 (brain v3.3)'
+const VERSION = 'v0.3.19 (brain v3.3)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -144,10 +143,12 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   while (history.length > HISTORY_MAX_TURNS * 2) history.shift()
   chatHistory.set(chatId, history)
 
-  // 2а) Свежие данные? Гонка поисковых движков → выдача в контекст LLM.
+  // 2а) Сначала интернет, потом ответ: поиск на КАЖДЫЙ вопрос (v0.3.19, не
+  // только по ключевым словам — владелец попросил «хоть что спрошу — должна
+  // посмотреть»). Модель сама игнорирует нерелевантные результаты (болтовня).
   // Погода без города («А погода?») — берём город из предыдущих реплик диалога.
   let webContext = ''
-  if ((env.WEB_SEARCH || '') !== 'off' && needsWebSearch(command)) {
+  if ((env.WEB_SEARCH || '') !== 'off') {
     try {
       const seed = withCityContext(command, prevUserTexts)
       const results = await webSearch(buildSearchQuery(seed))
@@ -223,7 +224,7 @@ async function handleStatus(env: Env): Promise<Response> {
     `<p>Версия: ${VERSION}</p>`,
     token ? '<p>Токен: задан ✅</p>' : '<p>Токен: НЕ задан — добавьте секрет TELEGRAM_BOT_TOKEN</p>',
     brainLine,
-    `<p>Веб-поиск: ${env.WEB_SEARCH === 'off' ? 'выключен 🚫' : 'включён 🌐 (5 движков + Википедия)'}</p>`,
+    `<p>Веб-поиск: ${env.WEB_SEARCH === 'off' ? 'выключен 🚫' : 'включён 🌐 (на каждый вопрос; новости — Google News, погода/курсы/время — точные источники)'}</p>`,
     webhookInfo,
     '<p>Setup: <code>/setup?bot_token=ТОКЕН</code></p>',
   ].join(''))
