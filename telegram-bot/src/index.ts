@@ -20,6 +20,7 @@ import {
   resolveCommand,
   askLLM,
   NO_BRAIN,
+  NO_PAINT,
   OPENROUTER_CHAIN,
   webSearch,
   formatSearchContext,
@@ -27,6 +28,8 @@ import {
   fixFalseGoogled,
   withCityContext,
   splitTelegramMessage,
+  extractImageIntent,
+  geminiImage,
 } from './brain.js'
 
 export interface Env {
@@ -46,7 +49,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.21 (brain v3.3)'
+const VERSION = 'v0.3.22 (brain v3.3)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -110,6 +113,17 @@ async function sendMessage(token: string, chatId: number, text: string, replyTo?
   return last
 }
 
+/** Картинка в Telegram: sendPhoto принимает multipart-загрузку, не URL/ID */
+async function sendPhoto(token: string, chatId: number, b64: string, mime: string, caption: string, replyTo?: number) {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+  const form = new FormData()
+  form.append('chat_id', String(chatId))
+  if (caption) form.append('caption', caption.slice(0, 1024)) // лимит подписи в ТГ
+  if (replyTo) form.append('reply_to_message_id', String(replyTo))
+  form.append('photo', new Blob([bytes], { type: mime }), 'daria.png')
+  return fetch(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', body: form })
+}
+
 // ── Обработка апдейта ────────────────────────────────────────────────────
 
 async function handleMessage(msg: any, env: Env): Promise<void> {
@@ -145,8 +159,29 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
     return
   }
 
-  // 2) Свободные темы — через LLM (Coarena → Gemini → OpenRouter)
+  // История диалога (для веб-поиска, рисования и LLM)
   const history = chatHistory.get(chatId) ?? []
+
+  // 1б) Рисование (v0.3.22): «нарисуй …» — это image-модель, не текстовый LLM
+  const imagePrompt = extractImageIntent(command)
+  if (imagePrompt) {
+    const r = await geminiImage(imagePrompt, {
+      geminiKey: env.GEMINI_API_KEY || '',
+      geminiBaseUrl: env.GEMINI_BASE_URL || '',
+    })
+    if (r.image) {
+      await sendPhoto(token, chatId, r.image.b64, r.image.mime, `🎨 ${imagePrompt}`, isPrivate ? undefined : msg.message_id)
+      history.push({ role: 'user', content: text }, { role: 'assistant', content: `[нарисовала картинку: ${imagePrompt}]` })
+      if (history.length > HISTORY_MAX_TURNS * 2) history.splice(0, history.length - HISTORY_MAX_TURNS * 2)
+      chatHistory.set(chatId, history)
+      return
+    }
+    // рисовалка недоступна — честно, без ложных обещаний
+    await sendMessage(token, chatId, NO_PAINT[Math.floor(Math.random() * NO_PAINT.length)], isPrivate ? undefined : msg.message_id)
+    return
+  }
+
+  // 2) Свободные темы — через LLM (Coarena → Gemini → OpenRouter)
   const prevUserTexts = history.filter((h) => h.role === 'user').map((h) => h.content).slice(-4)
   history.push({ role: 'user', content: text }) // в контекст — исходная фраза
   while (history.length > HISTORY_MAX_TURNS * 2) history.shift()
@@ -292,6 +327,34 @@ async function handleSearchTest(url: URL, env: Env): Promise<Response> {
 }
 
 /** Диагностика «мозга»: откуда воркер ходит в сеть, жив ли ключ Gemini, тестовый ответ */
+async function handleImageTest(url: URL, env: Env): Promise<Response> {
+  const json = (obj: any, status = 200) =>
+    new Response(JSON.stringify(obj, null, 2), {
+      status,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    })
+  const key = env.SEARCH_TEST_KEY || ''
+  if (key && url.searchParams.get('key') !== key) return json({ ok: false, error: 'неверный key' }, 403)
+  const prompt = (url.searchParams.get('q') || 'рыжий кот в художественном берете, цифровая живопись').trim()
+  const t0 = Date.now()
+  const r = await geminiImage(prompt, {
+    geminiKey: env.GEMINI_API_KEY || '',
+    geminiBaseUrl: env.GEMINI_BASE_URL || '',
+  })
+  if (!r.image) return json({ ok: false, error: r.error, tried: r.tried, ms: Date.now() - t0 }, 500)
+  const bytes = Uint8Array.from(atob(r.image.b64), (c) => c.charCodeAt(0))
+  const info = { ok: true, model: r.image.model, mime: r.image.mime, bytes: bytes.length, ms: Date.now() - t0 }
+  if (url.searchParams.get('raw') === '1') {
+    return new Response(bytes, { headers: { 'content-type': r.image.mime, 'x-image-model': r.image.model } })
+  }
+  const sendTo = Number(url.searchParams.get('send') || '')
+  if (sendTo) {
+    const sent = await sendPhoto(env.TELEGRAM_BOT_TOKEN, sendTo, r.image.b64, r.image.mime, `🎨 Тест v0.3.22: ${prompt}`)
+    return json({ ...info, sentTo: sendTo, sent: sent.ok })
+  }
+  return json(info)
+}
+
 async function handleLlmTest(url: URL, env: Env): Promise<Response> {
   const json = (obj: any, status = 200) =>
     new Response(JSON.stringify(obj, null, 2), {
@@ -553,6 +616,7 @@ export default {
     if (url.pathname === '/setup' && request.method === 'GET') return handleSetup(url, env)
     if (url.pathname === '/search-test' && request.method === 'GET') return handleSearchTest(url, env)
     if (url.pathname === '/llm-test' && request.method === 'GET') return handleLlmTest(url, env)
+    if (url.pathname === '/image-test' && request.method === 'GET') return handleImageTest(url, env)
     if (url.pathname === '/telegram-webhook' && request.method === 'POST') return handleWebhook(request, env, ctx)
     return new Response('not found', { status: 404 })
   },

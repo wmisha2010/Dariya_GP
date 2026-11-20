@@ -13,6 +13,8 @@ import {
   newsSearch,
   parseNewsRss,
   splitTelegramMessage,
+  extractImageIntent,
+  geminiImage,
   parseDdgHtml,
   parseDdgLiteHtml,
   parseBingHtml,
@@ -515,6 +517,96 @@ console.log('── Длинные ответы: разбивка под лим�
     oneChar.length >= 2 && oneChar.every((c) => c.length <= 1))
   check('limit=0 → откат к дефолту 4000',
     splitTelegramMessage('а'.repeat(4000), 0).length === 1)
+}
+
+console.log('── Рисование: интент «нарисуй …» и geminiImage ──')
+{
+  check('«нарисуй кота в шляпе» → «кота в шляпе»',
+    extractImageIntent('нарисуй кота в шляпе') === 'кота в шляпе')
+  check('«изобрази закат над морем» → «закат над морем»',
+    extractImageIntent('изобрази закат над морем') === 'закат над морем')
+  check('«сделай картинку про Париж» → «Париж»',
+    extractImageIntent('сделай картинку про Париж') === 'Париж')
+  check('«сгенерируй фото рыжего кота» → «рыжего кота»',
+    extractImageIntent('сгенерируй фото рыжего кота') === 'рыжего кота')
+  check('«Ну нарисуйка звёздное небо» → «звёздное небо»',
+    extractImageIntent('Ну нарисуйка звёздное небо') === 'звёздное небо')
+  check('отказ «не рисуй» → не заказ', extractImageIntent('не рисуй') === null)
+  check('вопрос «как нарисовать дом?» → не заказ', extractImageIntent('как нарисовать дом?') === null)
+  check('голый «нарисуй» без объекта → не заказ', extractImageIntent('нарисуй') === null)
+  check('болтовня про живопись → не заказ', extractImageIntent('расскажи про живопись') === null)
+}
+{
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  const b64 = 'iVBORw0KGgo' + 'A'.repeat(1400)
+  // Interactions API ответил картинкой → первый же модели хватает
+  globalThis.fetch = async (url, init) => {
+    const u = String(url)
+    if (u.includes('/v1beta/interactions') && init?.headers?.['x-goog-api-key'] === 'test-key') {
+      return new Response(JSON.stringify({
+        steps: [{ type: 'model_output', content: [
+          { type: 'text', text: 'Вот твоя картинка' },
+          { type: 'image', mime_type: 'image/png', data: b64 },
+        ] }],
+      }), { status: 200 })
+    }
+    return new Response('unexpected', { status: 500 })
+  }
+  try {
+    const r = await geminiImage('кот в шляпе', { geminiKey: 'test-key' })
+    check('Interactions API: картинка найдена в глубине ответа',
+      !!r.image && r.image.mime === 'image/png' && r.image.b64.length > 1000)
+    check('Interactions API: модель — nano-banana-2.1', r.image?.model === 'gemini-nano-banana-2.1')
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+  }
+}
+{
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  // Interactions 404 у ключа → откат на legacy generateContent с inlineData
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes('/v1beta/interactions')) return new Response('not found', { status: 404 })
+    if (u.includes('/models/gemini-2.5-flash-image:generateContent')) {
+      return new Response(JSON.stringify({
+        candidates: [{ content: { parts: [
+          { text: 'думаю...' },
+          { inlineData: { mimeType: 'image/jpeg', data: 'J' + 'B'.repeat(1200) } },
+        ] } }],
+      }), { status: 200 })
+    }
+    return new Response('unexpected', { status: 500 })
+  }
+  try {
+    const r = await geminiImage('закат', { geminiKey: 'test-key' })
+    check('legacy-откат: inlineData вытащен, mime jpeg',
+      !!r.image && r.image.mime === 'image/jpeg' && r.image.model === 'gemini-2.5-flash-image')
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+  }
+}
+{
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  // всё недоступно → честный { error, tried } без image
+  globalThis.fetch = async () => new Response('{"error":"quota"}', { status: 429 })
+  try {
+    const r = await geminiImage('космос', { geminiKey: 'test-key' })
+    check('все модели недоступны → error + tried без image',
+      !r.image && typeof r.error === 'string' && Array.isArray(r.tried) && r.tried.length >= 3)
+    check('без ключа → сразу честный отказ',
+      !(await geminiImage('кот', { geminiKey: '' })).image)
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+  }
 }
 
 console.log('── Быстрое время на голое «Время» ──')

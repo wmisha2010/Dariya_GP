@@ -1106,3 +1106,31 @@ HTML страниц — свежий (вместе с выключателем) 
   outdir /tmp/daria-bundle) — тот же esbuild, что в сборке CF, работает без авторизации.
   Локально воспроизвёл падение dry-run'ом ДО пуша, починил, dry-run зелёный (80 KiB),
   потом запушил. Больше не пушить без тестов + check:bundle.
+
+## v0.3.22 (2026-11-20) — Дария рисует: «нарисуй …» через Gemini image-модели
+- Владелец: «подключена мультимодальная модель, но рисовать она не умеет». Объяснение:
+  мультимодальность (vision) = понимание картинок, рисование = отдельная генеративная
+  модель. В доке AI Studio 2026 картинки идут через НОВЫЙ Interactions API
+  (POST /v1beta/interactions, модели gemini-nano-banana-2.1 / 3.1-flash-image /
+  legacy 2.5-flash-image), а не generateContent — потому текстовые мозги и не рисуют.
+  Попутно выяснено: бот вообще игнорирует фото (if (!text) return) — vision пока
+  нигде не задействован, «видеть» она тоже не умеет (кандидат на следующий релиз).
+- brain.js NEW: extractImageIntent — консервативный интент (нарисуй/изобрази/
+  сфотографируй + сделай|сгенерируй|создай + картинку|фото|рисунок|постер; отказ «не …»,
+  вопросы «как нарисовать», голые глаголы без объекта → не заказ); findImageBlock —
+  глубокий поиск {type:'image', data(>1000 b64)} в ответе Interactions; geminiImage —
+  цепочка Interactions (nano-banana-2.1 → 3.1-flash-image → 2.5-flash-image) + откат
+  на legacy generateContent (responseModalities TEXT+IMAGE, inlineData); 404 Interactions
+  → сразу legacy; бюджет 25 с (фон Telegram 30 с), лимит каждой попытки 20 с;
+  возвращают {image:{b64,mime,model}} | {error, tried}. NO_PAINT — честные отказы.
+- index.ts: ветка рисования ПОСЛЕ quick-ответов, ДО веб-поиска (history объявлена
+  раньше ветки — первый вариант ссылался на history до объявления, поймал при
+  самопроверке); в контекст пишется [нарисовала картинку: …] для последующих вопросов;
+  sendPhoto через multipart FormData+Blob (base64 → Uint8Array); /image-test —
+  диагностика: JSON {ok, model, mime, bytes, ms}, ?raw=1 → сама картинка,
+  ?send=<chat_id> → реальная отправка в Telegram (гейт SEARCH_TEST_KEY, как у search-test).
+- Тесты 177→193 (+16: интент 9 шт, Interactions-успех с глубоким поиском блока,
+  404→legacy-откат, всё недоступно → {error, tried}, без ключа). tsc поймал опечатку
+  sentTo/sendTo в handleImageTest — фиксировано. check:bundle зелёный (89 KiB).
+  Пуш 4efa2b3 → main, прод-проверка: /image-test?raw=1 → PIL-проверка непустоты,
+  ?send=8819737795 → картинка владельцу в ТГ.

@@ -144,6 +144,12 @@ export const NO_BRAIN = [
   'Хотела ответить умно, но мозг промолчал 😄 Хозяину намёк: дневной лимит Coarena мог кончиться, у бесплатных моделей OpenRouter свои лимиты, а мост Gemini мог быть выключен — попробуй позже.',
 ]
 
+export const NO_PAINT = [
+  'Хотела нарисовать, но художница сегодня не удалась: сервис картинок не ответил 🙈 Попробуй ещё раз чуть позже!',
+  'Кисти закончились — API рисования молчит 😅 Повтори позже, я помню, что ты просила!',
+  'Не вышло нарисовать: картинный мозг не ответил. Спроси словами — на это я точно отвечу!',
+]
+
 export function formatTime(tz = 'Europe/Moscow') {
   return new Intl.DateTimeFormat('ru-RU', {
     hour: '2-digit', minute: '2-digit', timeZone: tz,
@@ -747,6 +753,110 @@ export function fixFalseGoogled(text) {
   if (!text || !/погуглил/i.test(text)) return text
   // \b с кириллицей не работает — lookahead
   return text.replace(/[Пп]огуглил[аи]?(?![а-яё])/g, (m) => (m[0] === 'П' ? 'Вспомнила' : 'вспомнила'))
+}
+
+// ── Рисование (v0.3.22): intent + Gemini image-модели ─────────────────────
+// Рисование — НЕ текстовый LLM: с 2026 картинки в Gemini API идут через
+// Interactions API (/v1beta/interactions), а не generateContent.
+
+/** Просит ли фразу нарисовать, и что именно. null — обычное сообщение.
+ *  Консервативно: только явные глаголы, чтобы не перехватывать болтовню. */
+export function extractImageIntent(text) {
+  const t = String(text || '').trim()
+  if (!t || /^не\b/i.test(t)) return null // «не рисуй» — отказ, не заказ
+  let m = t.match(/^(?:ну\s+)?(?:нарисуй(?:ка|те)?|изобрази(?:те)?|сфотографируй)\s+(?:мне\s+)?(.{2,})$/i)
+  if (m) return m[1].trim()
+  m = t.match(/^(?:сделай|сгенерируй|создай)\s+(?:мне\s+)?(?:картинку|фотку|фото|изображение|рисунок|коллаж|постер)\s+(?:про|на тему|с|о|где|как)?\s*(.{2,})$/i)
+  if (m) return m[1].trim()
+  return null
+}
+
+/** Глубокий поиск картинки-базы64 в ответе Interactions API (поле data
+ *  рядом с type:'image' / mime_type). Данные > 1000 символов — не текст. */
+function findImageBlock(node, depth = 0) {
+  if (!node || depth > 8) return null
+  if (Array.isArray(node)) {
+    for (const n of node) { const r = findImageBlock(n, depth + 1); if (r) return r }
+    return null
+  }
+  if (typeof node === 'object') {
+    if (typeof node.data === 'string' && node.data.length > 1000
+      && (node.type === 'image' || node.mime_type || node.mimeType)) {
+      return { b64: node.data, mime: node.mime_type || node.mimeType || 'image/png' }
+    }
+    for (const v of Object.values(node)) { const r = findImageBlock(v, depth + 1); if (r) return r }
+  }
+  return null
+}
+
+const IMAGE_MODELS = ['gemini-nano-banana-2.1', 'gemini-3.1-flash-image', 'gemini-2.5-flash-image']
+
+/** Рисует картинку по текстовому запросу. Успех: { image: {b64, mime, model} },
+ *  неудача: { error, tried }. Бюджет ~25 с, чтобы уложиться в фон Telegram. */
+export async function geminiImage(prompt, opts = {}) {
+  const key = opts.geminiKey || ''
+  if (!key) return { error: 'нет GEMINI_API_KEY', tried: [] }
+  const base = (opts.geminiBaseUrl || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '')
+  const deadline = Date.now() + 25000
+  const tried = []
+
+  // Новый путь: Interactions API (2026) — картинки приходят блоками {type:'image', data}
+  for (const model of IMAGE_MODELS) {
+    if (Date.now() > deadline) break
+    tried.push(model)
+    try {
+      const res = await fetch(`${base}/interactions`, {
+        method: 'POST',
+        headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json', 'Api-Revision': '2026-05-20' },
+        body: JSON.stringify({ model, input: [{ type: 'text', text: prompt }], response_format: { type: 'image' } }),
+        signal: AbortSignal.timeout(20000),
+      })
+      if (res.ok) {
+        const img = findImageBlock(await res.json())
+        if (img) return { image: { ...img, model } }
+        tried[tried.length - 1] += ' (без картинки в ответе)'
+      } else {
+        const err = await res.text().catch(() => '')
+        tried[tried.length - 1] += ` HTTP ${res.status}`
+        console.error(`[image] ${model}: HTTP ${res.status} ${err.slice(0, 150)}`)
+        if (res.status === 404) break // Interactions API нет у ключа → сразу legacy
+      }
+    } catch (e) {
+      tried[tried.length - 1] += ' таймаут'
+      console.error(`[image] ${model}: ${e?.message || e}`)
+    }
+  }
+
+  // Запасной путь: legacy generateContent с inlineData (пока жив — используем)
+  for (const model of ['gemini-2.5-flash-image', 'gemini-2.0-flash-preview-image-generation']) {
+    if (Date.now() > deadline) break
+    tried.push(`legacy ${model}`)
+    try {
+      const res = await fetch(`${base}/models/${model}:generateContent?key=${encodeURIComponent(key)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+        }),
+        signal: AbortSignal.timeout(20000),
+      })
+      if (res.ok) {
+        const parts = (await res.json())?.candidates?.[0]?.content?.parts || []
+        const p = parts.find((x) => x.inlineData?.data)
+        if (p) return { image: { b64: p.inlineData.data, mime: p.inlineData.mimeType || 'image/png', model } }
+        tried[tried.length - 1] += ' (без inlineData)'
+      } else {
+        const err = await res.text().catch(() => '')
+        tried[tried.length - 1] += ` HTTP ${res.status}`
+        console.error(`[image-legacy] ${model}: HTTP ${res.status} ${err.slice(0, 150)}`)
+      }
+    } catch (e) {
+      tried[tried.length - 1] += ' таймаут'
+      console.error(`[image-legacy] ${model}: ${e?.message || e}`)
+    }
+  }
+  return { error: 'все image-модели недоступны', tried }
 }
 
 /**
