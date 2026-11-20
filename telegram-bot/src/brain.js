@@ -799,6 +799,7 @@ export async function geminiImage(prompt, opts = {}) {
   const base = (opts.geminiBaseUrl || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '')
   const deadline = Date.now() + 25000
   const tried = []
+  let lastError = '' // тело последней ошибки — для диагностики в /image-test
 
   // Новый путь: Interactions API (2026) — картинки приходят блоками {type:'image', data}
   for (const model of IMAGE_MODELS) {
@@ -818,6 +819,7 @@ export async function geminiImage(prompt, opts = {}) {
       } else {
         const err = await res.text().catch(() => '')
         tried[tried.length - 1] += ` HTTP ${res.status}`
+        lastError = `HTTP ${res.status}: ${err.slice(0, 200)}`
         console.error(`[image] ${model}: HTTP ${res.status} ${err.slice(0, 150)}`)
         if (res.status === 404) break // Interactions API нет у ключа → сразу legacy
       }
@@ -849,6 +851,7 @@ export async function geminiImage(prompt, opts = {}) {
       } else {
         const err = await res.text().catch(() => '')
         tried[tried.length - 1] += ` HTTP ${res.status}`
+        lastError = `HTTP ${res.status}: ${err.slice(0, 200)}`
         console.error(`[image-legacy] ${model}: HTTP ${res.status} ${err.slice(0, 150)}`)
       }
     } catch (e) {
@@ -856,7 +859,7 @@ export async function geminiImage(prompt, opts = {}) {
       console.error(`[image-legacy] ${model}: ${e?.message || e}`)
     }
   }
-  return { error: 'все image-модели недоступны', tried }
+  return { error: 'все image-модели недоступны', tried, lastError }
 }
 
 /**

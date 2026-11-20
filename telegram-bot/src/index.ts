@@ -49,7 +49,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.22 (brain v3.3)'
+const VERSION = 'v0.3.23 (brain v3.3)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -341,7 +341,7 @@ async function handleImageTest(url: URL, env: Env): Promise<Response> {
     geminiKey: env.GEMINI_API_KEY || '',
     geminiBaseUrl: env.GEMINI_BASE_URL || '',
   })
-  if (!r.image) return json({ ok: false, error: r.error, tried: r.tried, ms: Date.now() - t0 }, 500)
+  if (!r.image) return json({ ok: false, error: r.error, tried: r.tried, lastError: r.lastError || '', ms: Date.now() - t0 }, 500)
   const bytes = Uint8Array.from(atob(r.image.b64), (c) => c.charCodeAt(0))
   const info = { ok: true, model: r.image.model, mime: r.image.mime, bytes: bytes.length, ms: Date.now() - t0 }
   if (url.searchParams.get('raw') === '1') {
