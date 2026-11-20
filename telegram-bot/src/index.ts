@@ -50,7 +50,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.25 (brain v3.5)'
+const VERSION = 'v0.3.26 (brain v3.5)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -485,6 +485,48 @@ async function handleVoiceTest(url: URL, env: Env): Promise<Response> {
   return json({ ok: !!r.text, text: r.text || '', model: r.model || '', tried: r.tried, lastError: r.lastError || '', attempts, ms: Date.now() - t0 })
 }
 
+/** Проверка ключа Gemini через сеть Cloudflare: из песочницы владельца Google
+ *  блокирует регион, а тело ошибки WebFetch не показывает. ?candidate=…&kind=models|text.
+ *  Ключ НИКОГДА не возвращается в ответе и не пишется в логи. */
+async function handleGeminiKeyTest(url: URL, env: Env): Promise<Response> {
+  const json = (obj: any, status = 200) =>
+    new Response(JSON.stringify(obj, null, 2), {
+      status,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    })
+  const gate = env.SEARCH_TEST_KEY || ''
+  if (gate && url.searchParams.get('key') !== gate) return json({ ok: false, error: 'неверный key' }, 403)
+  const candidate = (url.searchParams.get('candidate') || env.GEMINI_API_KEY || '').trim()
+  if (!candidate) return json({ ok: false, error: 'нет candidate и GEMINI_API_KEY пуст' })
+  const kind = url.searchParams.get('kind') === 'text' ? 'text' : 'models'
+  try {
+    if (kind === 'models') {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?pageSize=100&key=${encodeURIComponent(candidate)}`, { signal: AbortSignal.timeout(15000) })
+      const body: any = await res.json().catch(() => ({}))
+      if (res.ok) {
+        const ms: string[] = (body?.models || []).map((m: any) => String(m.name || '').replace('models/', ''))
+        return json({ ok: true, verdict: 'валиден (список моделей)', count: ms.length, flash: ms.filter((m) => m.includes('flash')).slice(0, 12), image: ms.filter((m) => m.includes('image')).slice(0, 8) })
+      }
+      return json({ ok: false, verdict: `HTTP ${res.status}`, error: String(body?.error?.message || '').slice(0, 300), status: body?.error?.status || '' })
+    }
+    // kind=text: минимальный generateContent — проверка именно генерации
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${encodeURIComponent(candidate)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Ответь одним словом: живой' }] }], generationConfig: { temperature: 0, maxOutputTokens: 16 } }),
+      signal: AbortSignal.timeout(20000),
+    })
+    const body: any = await res.json().catch(() => ({}))
+    if (res.ok) {
+      const reply = (body?.candidates?.[0]?.content?.parts || []).map((p: any) => p.text || '').join('').trim()
+      return json({ ok: true, verdict: 'валиден (generateContent)', reply, modelVersion: body?.modelVersion || '' })
+    }
+    return json({ ok: false, verdict: `HTTP ${res.status}`, error: String(body?.error?.message || '').slice(0, 300), status: body?.error?.status || '' })
+  } catch (e: any) {
+    return json({ ok: false, verdict: 'сеть/таймаут', error: String(e?.message || e).slice(0, 200) })
+  }
+}
+
 async function handleLlmTest(url: URL, env: Env): Promise<Response> {
   const json = (obj: any, status = 200) =>
     new Response(JSON.stringify(obj, null, 2), {
@@ -749,6 +791,7 @@ export default {
     if (url.pathname === '/image-test' && request.method === 'GET') return handleImageTest(url, env)
     if (url.pathname === '/vision-test' && request.method === 'GET') return handleVisionTest(url, env)
     if (url.pathname === '/voice-test' && request.method === 'GET') return handleVoiceTest(url, env)
+    if (url.pathname === '/gemini-key-test' && request.method === 'GET') return handleGeminiKeyTest(url, env)
     if (url.pathname === '/telegram-webhook' && request.method === 'POST') return handleWebhook(request, env, ctx)
     return new Response('not found', { status: 404 })
   },
