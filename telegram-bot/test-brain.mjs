@@ -509,6 +509,12 @@ console.log('── Длинные ответы: разбивка под лим�
   check('текст без переносов → жёсткий разрез', hchunks.length >= 2 && hchunks.every((c) => c.length <= 4000))
   check('ровно 4000 символов → один кусок', splitTelegramMessage('а'.repeat(4000)).length === 1)
   check('4001 символ → два куска', splitTelegramMessage('а'.repeat(4001)).length === 2)
+  // деградированные лимиты: не зависаем, не роняем (guard переприсваивания — урок v0.3.21)
+  const oneChar = splitTelegramMessage('слово'.repeat(3000), 1)
+  check('limit=1: не зависает, куски ≤ 1 символа',
+    oneChar.length >= 2 && oneChar.every((c) => c.length <= 1))
+  check('limit=0 → откат к дефолту 4000',
+    splitTelegramMessage('а'.repeat(4000), 0).length === 1)
 }
 
 console.log('── Быстрое время на голое «Время» ──')

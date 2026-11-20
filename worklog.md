@@ -1090,3 +1090,19 @@ HTML страниц — свежий (вместе с выключателем) 
   прогон поймал ошибку фикстуры: 40 абзацев = 3400 символов < лимита → один кусок;
   удлинил до 60. npm install потребовался после переработки песочницы (node_modules
   был пуст). tsc чисто.
+
+### Фикс сборки v0.3.21 (2026-11-20, тот же день) — esbuild не прощает const
+- Первый пуш v0.3.21 (bf020c0) УПАЛ в сборке Cloudflare: «Cannot assign to "cut"
+  because it is a constant» — в splitTelegramMessage строка `if (cut <= 0) cut = limit`
+  переприсваивала const (esbuild-ошибка brain.js:735). Претензия владельца с
+  Screenshot_966.png: «Latest build failed» в дашборде.
+- Почему оба прежних фильтра слепые: node-тесты не поймали — присваивание в const в Node
+  это TypeError ВРЕМЕНИ ВЫПОЛНЕНИЯ, а ветка ни разу не выполнилась (cut всегда > 0 при
+  sane limit); tsc brain.js вообще не проверяет (обычный JS, allowJs выключен).
+- Исправлено: `let cut` + guard `max = Math.max(1, Number(limit) || 4000)` (limit=0/NaN →
+  дефолт, без вечных циклов). Тесты +2 (limit=1: 15 000 символов без пробелов → куски по
+  1, не зависает; limit=0 → откат к 4000). 179/179.
+- NEW обязательный предпуш-гейт: `npm run check:bundle` (wrangler deploy --dry-run --
+  outdir /tmp/daria-bundle) — тот же esbuild, что в сборке CF, работает без авторизации.
+  Локально воспроизвёл падение dry-run'ом ДО пуша, починил, dry-run зелёный (80 KiB),
+  потом запушил. Больше не пушить без тестов + check:bundle.

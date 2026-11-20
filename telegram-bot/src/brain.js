@@ -722,17 +722,19 @@ export const TG_MSG_LIMIT = 4096
  *  чтобы даже кусок с эмодзи-парными символами точно прошёл. */
 export function splitTelegramMessage(text, limit = 4000) {
   const t = String(text || '')
+  const max = Math.max(1, Number(limit) || 4000) // кривой limit (0, NaN) → дефолт
   if (!t) return []
-  if (t.length <= limit) return [t]
+  if (t.length <= max) return [t]
   const chunks = []
   let rest = t
-  while (rest.length > limit) {
-    const window = rest.slice(0, limit + 1)
+  while (rest.length > max) {
+    const window = rest.slice(0, max + 1)
     const para = window.lastIndexOf('\n\n')
     const line = window.lastIndexOf('\n')
     const space = window.lastIndexOf(' ')
-    const cut = para > limit * 0.4 ? para : line > limit * 0.4 ? line : space > limit * 0.4 ? space : limit
-    if (cut <= 0) cut = limit // разрез в позиции 0 → пустой кусок → вечный цикл
+    // let, не const: ниже защитный guard переприсваивает cut (урок v0.3.21)
+    let cut = para > max * 0.4 ? para : line > max * 0.4 ? line : space > max * 0.4 ? space : max
+    if (cut <= 0) cut = max // разрез в позиции 0 → пустой кусок → вечный цикл
     chunks.push(rest.slice(0, cut).replace(/\s+$/, ''))
     rest = rest.slice(cut).replace(/^\s+/, '')
   }
