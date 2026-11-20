@@ -31,6 +31,7 @@ import {
   resetCoarenaBreaker,
   withImageParts,
   VISION_OPENROUTER,
+  transcribeAudio,
 } from './src/brain.js'
 
 let passed = 0
@@ -725,6 +726,82 @@ console.log('── Зрение: фото в askLLM (coarena/gemini/openrouter)
     check('gemini: inlineData с картинкой в последней реплике',
       reply === 'Кот на подоконнике' && parts?.length === 2
       && parts[1]?.inlineData?.data === b64 && parts[1]?.inlineData?.mimeType === 'image/jpeg')
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+  }
+}
+
+console.log('── Голосовые: transcribeAudio (gemini/coarena/openrouter) ──')
+{
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  const b64 = 'T2dnUwAC' + 'A'.repeat(200)
+  let gemBody = null
+  // Gemini native: inlineData с audio/ogg
+  globalThis.fetch = async (url, init) => {
+    const u = String(url)
+    if (u.includes('generativelanguage')) {
+      gemBody = JSON.parse(init.body)
+      return new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: 'Привет, Дария, какая завтра погода?' }] } }],
+      }), { status: 200 })
+    }
+    return new Response('unexpected', { status: 500 })
+  }
+  try {
+    const r = await transcribeAudio(b64, 'audio/ogg', { geminiKey: 'gk-test' })
+    const parts = gemBody?.contents?.[0]?.parts
+    check('gemini: аудио ушло inlineData (audio/ogg), текст получен',
+      r.text === 'Привет, Дария, какая завтра погода?' && r.model === 'gemini-3.6-flash'
+      && parts?.[1]?.inlineData?.mimeType === 'audio/ogg' && parts?.[1]?.inlineData?.data === b64)
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+  }
+}
+{
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  const b64 = 'T2dnUwAC' + 'B'.repeat(200)
+  let caBody = null
+  // Без ключа Gemini → Coarena: OpenAI input_audio с format:'ogg'
+  globalThis.fetch = async (url, init) => {
+    const u = String(url)
+    if (u.includes('coarena.ai/api/v1/chat/completions')) {
+      caBody = JSON.parse(init.body)
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'привет какая погода' } }] }), { status: 200 })
+    }
+    return new Response('unexpected', { status: 500 })
+  }
+  try {
+    const r = await transcribeAudio(b64, 'audio/ogg', { coarenaKey: 'k' })
+    const audio = caBody?.messages?.[0]?.content?.[1]?.input_audio
+    check('coarena: input_audio (format ogg) с чистым base64',
+      r.text === 'привет какая погода' && r.model === 'deepseek-v4-1-flash-1017'
+      && audio?.format === 'ogg' && audio?.data === b64)
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+  }
+}
+{
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  // всё 429 → честный {error, tried, lastError}; без ключей — отказ сразу без fetch
+  globalThis.fetch = async () => new Response('{"error":"quota"}', { status: 429 })
+  try {
+    const r = await transcribeAudio('A'.repeat(100), 'audio/ogg', { coarenaKey: 'k', openrouterKey: 'o', geminiKey: 'gk' })
+    check('все мозги недоступны → error + tried + lastError без text',
+      !r.text && typeof r.error === 'string' && Array.isArray(r.tried) && r.tried.length >= 4 && r.lastError.includes('429'))
+    let called = 0
+    globalThis.fetch = async () => { called += 1; return new Response('x', { status: 200 }) }
+    const r2 = await transcribeAudio('A'.repeat(100), 'audio/ogg', {})
+    check('без ключей → отказ сразу, ни одного fetch',
+      !r2.text && r2.error === 'ни один мозг не расслышал' && called === 0)
   } finally {
     globalThis.fetch = realFetch
     console.error = realErr

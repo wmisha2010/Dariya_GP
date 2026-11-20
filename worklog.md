@@ -1172,3 +1172,35 @@ HTML страниц — свежий (вместе с выключателем) 
   vision-цепочка, gemini inlineData, фото-провалы×2 не включают автомат — 3 вызова×3
   модели=9 запросов к coarena). tsc поймал тип meta.json() → any. check:bundle 95 KiB.
   Прод: /vision-test → кто видит; в ТГ: фото с подписью и без.
+- Итог v0.3.24: прод-тест красного квадрата → «Красный.» за 956 мс — vision УМЕЕТ
+  даже deepseek арены (в доках Coarena про vision ни слова). Ничего менять не нужно.
+
+## v0.3.25 (2026-11-20) — Дария слышит: расшифровка голосовых сообщений
+- Владелец: «хочу, чтобы Дария могла расшифровывать голосовые». Голосовые до сих пор
+  игнорировались (if (!text) return). Telegram voice = OGG/Opus (mime audio/ogg).
+  Попутно закрыт висящий todo «чанкование длинных ответов ≤4096» — оно УЖЕ в проде
+  с v0.3.21 (splitTelegramMessage в sendMessage), дубль не потребовался.
+- brain.js NEW: transcribeAudio(b64, mime, opts) — цепочка: 1) Gemini native
+  generateContent inlineData audio/ogg (единственный прямой путь, работает при
+  живом ключе — пока ключ мёртв, шаг пропускается) → 2) Coarena chat/completions
+  c input_audio {data(base64 без префикса), format:ogg|wav|mp3} — модели
+  [coarenaModel, gemini-3-8-flash, gpt-6-2-astra, ...COARENA_CHAIN] (текстовые
+  deepseek аудио не берут, но арена сама отфутболит) → 3) OpenRouter omni
+  nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free (живой список API: единственная
+  бесплатная модель с audio-входом). Возврат {text, model} | {error, tried, lastError};
+  opts.debug — отчёт попыток для /voice-test. Бюджет 25 с (фон Telegram 30 с),
+  по 20 с на попытку. Промпт: «верни ТОЛЬКО текст расшифровки», temperature 0.1.
+- index.ts: handleMessage принимает msg.voice (isVoice); расшифровка идёт ДО быстрых
+  ответов — голосом можно сказать «погода» и «нарисуй кота»; transcript → command
+  (подпись голосового, если была, идёт дополнением); не скачалось / не расслышалось →
+  честные сообщения. Рефактор: photoToB64 → общий tgFileB64(token, fileId, mime)
+  + обёртки (фото = image/jpeg, голос = voice.mime_type||audio/ogg).
+- /voice-test: вшитый сэмпл речи — espeak-ng «Привет Дария, какая завтра погода?»
+  → ffmpeg libopus 24k → OGG 8 КБ → base64 10 924 симв. (инъекция скриптом в
+  TEST_VOICE_B64, плейсхолдер INJECT_VOICE_B64). Ответ: {ok, text, model, tried,
+  lastError, attempts, ms}.
+- Тесты 200→204 (+4: gemini inlineData audio, coarena input_audio format ogg,
+  всё 429 → {error,tried,lastError}, без ключей → отказ без единого fetch).
+  node_modules после пересборки песочницы оказался пуст — npm install вернул;
+  tsc чисто, check:bundle 115.71 KiB (сэмпл +11 KiB). Пуш → прод /voice-test:
+  проверить, кто реально расшифровывает (Gemini мёртв, ставка на Coarena/omni).

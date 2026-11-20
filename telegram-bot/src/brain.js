@@ -862,6 +862,160 @@ export async function geminiImage(prompt, opts = {}) {
   return { error: 'все image-модели недоступны', tried, lastError }
 }
 
+// ── Расшифровка голосовых (v0.3.25): аудио → текст ────────────────────────
+// Telegram голосовые — OGG/Opus. Цепочка: Gemini native (inlineData, умеет
+// audio/ogg) → Coarena chat/completions с input_audio (OpenAI-формат, арена
+// проксирует мультимодальные модели) → OpenRouter omni-модель (бесплатная).
+
+const AUDIO_OPENROUTER = ['nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free']
+
+function audioFormat(mime) {
+  if (/wav/i.test(mime)) return 'wav'
+  if (/mpeg|mp3/i.test(mime)) return 'mp3'
+  return 'ogg'
+}
+
+/** Расшифровывает аудио (base64). Успех: { text, model }, неудача: { error, tried, lastError }.
+ *  Бюджет ~25 с — уложиться в фон Telegram. */
+export async function transcribeAudio(b64, mime = 'audio/ogg', opts = {}) {
+  const tried = []
+  const debug = opts.debug || null
+  const deadline = Date.now() + 25000
+  let lastError = ''
+  const prompt = 'Это голосовое сообщение из Telegram (скорее всего на русском). Расшифруй аудио. Верни ТОЛЬКО текст расшифровки, без комментариев, без кавычек и без форматирования.'
+
+  // 1) Gemini native — прямой audio/ogg через inlineData
+  const geminiKey = opts.geminiKey || ''
+  const bridgeMode = Boolean(opts.geminiBaseUrl)
+  if (geminiKey && (bridgeMode || !/^sk-/.test(geminiKey)) && Date.now() < deadline) {
+    const base = (opts.geminiBaseUrl || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '')
+    const models = [...new Set([opts.geminiModel || 'gemini-3.6-flash', ...GEMINI_FALLBACKS])]
+    for (const model of models) {
+      tried.push(`gemini ${model}`)
+      try {
+        const res = await fetch(`${base}/models/${model}:generateContent?key=${encodeURIComponent(geminiKey)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [
+              { text: prompt },
+              { inlineData: { mimeType: mime || 'audio/ogg', data: b64 } },
+            ] }],
+            generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
+          }),
+          signal: AbortSignal.timeout(20000),
+        })
+        if (res.ok) {
+          const raw = (await res.json())?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim()
+          const text = stripToolCallMarkup(raw)
+          if (text) {
+            debug?.push({ brain: 'gemini', model, ok: true })
+            return { text, model }
+          }
+          debug?.push({ brain: 'gemini', model, ok: false, why: 'пустой ответ' })
+        } else {
+          const err = await res.text().catch(() => '')
+          lastError = `HTTP ${res.status}: ${err.slice(0, 200)}`
+          debug?.push({ brain: 'gemini', model, ok: false, why: `HTTP ${res.status}` })
+          if (res.status === 404) break // модель устарела — идём дальше по цепочке мозгов
+        }
+      } catch (e) {
+        lastError = String(e?.message || e)
+        debug?.push({ brain: 'gemini', model, ok: false, why: 'сеть/таймаут' })
+      }
+    }
+  }
+
+  // 2) Coarena: OpenAI-формат input_audio (в data — чистый base64, без префикса)
+  const coarenaKey = opts.coarenaKey || ''
+  if (coarenaKey && Date.now() < deadline) {
+    const models = [...new Set([
+      opts.coarenaModel || 'deepseek-v4-1-flash-1017',
+      'gemini-3-8-flash', // аудио возьмут только мультимодальные — текстовые модели пропускаем смысла нет, но арена сама отфутболит
+      'gpt-6-2-astra',
+      ...COARENA_CHAIN,
+    ])]
+    for (const model of models) {
+      if (Date.now() > deadline) break
+      tried.push(`coarena ${model}`)
+      try {
+        const res = await fetch(`${COARENA_BASE}/chat/completions`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${coarenaKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: 'user', content: [
+              { type: 'text', text: prompt },
+              { type: 'input_audio', input_audio: { data: b64, format: audioFormat(mime) } },
+            ] }],
+            temperature: 0.1,
+            max_tokens: 512,
+          }),
+          signal: AbortSignal.timeout(20000),
+        })
+        if (res.ok) {
+          const raw = (await res.json())?.choices?.[0]?.message?.content?.trim()
+          const text = stripToolCallMarkup(raw)
+          if (text) {
+            debug?.push({ brain: 'coarena', model, ok: true })
+            return { text, model }
+          }
+          debug?.push({ brain: 'coarena', model, ok: false, why: 'пустой ответ' })
+        } else {
+          const err = await res.text().catch(() => '')
+          lastError = `HTTP ${res.status}: ${err.slice(0, 200)}`
+          debug?.push({ brain: 'coarena', model, ok: false, why: `HTTP ${res.status}` })
+        }
+      } catch (e) {
+        lastError = String(e?.message || e)
+        debug?.push({ brain: 'coarena', model, ok: false, why: 'сеть/таймаут' })
+      }
+    }
+  }
+
+  // 3) OpenRouter: бесплатная omni-модель с audio-входом
+  const openrouterKey = opts.openrouterKey || ''
+  if (openrouterKey && Date.now() < deadline) {
+    for (const model of AUDIO_OPENROUTER) {
+      tried.push(`openrouter ${model}`)
+      try {
+        const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${openrouterKey}`, 'Content-Type': 'application/json', 'X-Title': 'Daria Telegram Bot' },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: 'user', content: [
+              { type: 'text', text: prompt },
+              { type: 'input_audio', input_audio: { data: b64, format: audioFormat(mime) } },
+            ] }],
+            temperature: 0.1,
+            max_tokens: 512,
+          }),
+          signal: AbortSignal.timeout(20000),
+        })
+        if (res.ok) {
+          const raw = (await res.json())?.choices?.[0]?.message?.content?.trim()
+          const text = stripToolCallMarkup(raw)
+          if (text) {
+            debug?.push({ brain: 'openrouter', model, ok: true })
+            return { text, model }
+          }
+          debug?.push({ brain: 'openrouter', model, ok: false, why: 'пустой ответ' })
+        } else {
+          const err = await res.text().catch(() => '')
+          lastError = `HTTP ${res.status}: ${err.slice(0, 200)}`
+          debug?.push({ brain: 'openrouter', model, ok: false, why: `HTTP ${res.status}` })
+        }
+      } catch (e) {
+        lastError = String(e?.message || e)
+        debug?.push({ brain: 'openrouter', model, ok: false, why: 'сеть/таймаут' })
+      }
+    }
+  }
+
+  return { error: 'ни один мозг не расслышал', tried, lastError }
+}
+
 /**
  * Зачистка служебной tool-call разметки: некоторые модели (dots-3 и компания)
  * вместо ответа «вызывают» поиск сырым тегом — <dots_function_call>, <tool_call>,

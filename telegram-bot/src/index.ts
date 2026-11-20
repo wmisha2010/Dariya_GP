@@ -30,6 +30,7 @@ import {
   splitTelegramMessage,
   extractImageIntent,
   geminiImage,
+  transcribeAudio,
 } from './brain.js'
 
 export interface Env {
@@ -49,7 +50,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.24 (brain v3.4)'
+const VERSION = 'v0.3.25 (brain v3.5)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -124,13 +125,12 @@ async function sendPhoto(token: string, chatId: number, b64: string, mime: strin
   return fetch(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', body: form })
 }
 
-/** Фото из Telegram → base64: getFile даёт file_path, файл качаем с file-сервера
- *  и кодируем по частям (String.fromCharCode не любит огромные спреды). */
-async function photoToB64(token: string, sizes: any[]): Promise<{ b64: string; mime: string } | null> {
+/** Файл Telegram (фото/голос) → {b64, mime}: getFile даёт file_path, файл
+ *  качаем с file-сервера и кодируем по частям (спред ≤0x8000 не рвёт стек). */
+async function tgFileB64(token: string, fileId: string, mime: string): Promise<{ b64: string; mime: string } | null> {
   try {
-    const best = sizes[sizes.length - 1] // последний элемент — самый крупный размер
     const meta = await fetch(
-      `https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(best.file_id)}`,
+      `https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`,
       { signal: AbortSignal.timeout(10000) },
     )
     const file: any = await meta.json()
@@ -143,20 +143,27 @@ async function photoToB64(token: string, sizes: any[]): Promise<{ b64: string; m
     for (let i = 0; i < buf.length; i += 0x8000) {
       bin += String.fromCharCode(...buf.subarray(i, i + 0x8000))
     }
-    return { b64: btoa(bin), mime: 'image/jpeg' } // фото Telegram всегда отдаёт JPEG
+    return { b64: btoa(bin), mime }
   } catch (e) {
-    console.error('[photo] не удалось скачать:', e)
+    console.error('[tgfile] не удалось скачать:', e)
     return null
   }
+}
+
+/** Фото из Telegram → base64 (последний элемент sizes — самый крупный размер) */
+async function photoToB64(token: string, sizes: any[]): Promise<{ b64: string; mime: string } | null> {
+  const best = sizes[sizes.length - 1]
+  return tgFileB64(token, best.file_id, 'image/jpeg') // фото Telegram всегда отдаёт JPEG
 }
 
 // ── Обработка апдейта ────────────────────────────────────────────────────
 
 async function handleMessage(msg: any, env: Env): Promise<void> {
-  // Фото (v0.3.24): msg.text отсутствует — вопрос в подписи (или дефолтный)
+  // Фото (v0.3.24) и голосовые (v0.3.25): msg.text может отсутствовать
   const isPhoto = Array.isArray(msg?.photo) && msg.photo.length > 0
+  const isVoice = !!msg?.voice
   const text: string = (msg?.text || msg?.caption || '').trim()
-  if (!text && !isPhoto) return
+  if (!text && !isPhoto && !isVoice) return
 
   const isPrivate = msg.chat?.type === 'private'
   const chatId: number = msg.chat?.id
@@ -178,6 +185,29 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   }
   // Голое фото без подписи — дефолтный вопрос
   if (isPhoto && !command) command = 'Что на этом фото? Опиши подробно и живо.'
+
+  // Голосовые (v0.3.25): расшифровываем → дальше это обычный текст-команда.
+  // До быстрых ответов: голосом тоже можно сказать «погода» или «нарисуй кота».
+  if (isVoice) {
+    const audio = await tgFileB64(token, msg.voice.file_id, msg.voice.mime_type || 'audio/ogg')
+    if (!audio) {
+      await sendMessage(token, chatId, 'Не смогла скачать голосовое — Telegram не отдал файл 🙈 Попробуй ещё раз!', isPrivate ? undefined : msg.message_id)
+      return
+    }
+    const r = await transcribeAudio(audio.b64, audio.mime, {
+      coarenaKey: env.COARENA_API_KEY || '',
+      openrouterKey: env.OPENROUTER_API_KEY || '',
+      geminiKey: env.GEMINI_API_KEY || '',
+      geminiBaseUrl: env.GEMINI_BASE_URL || '',
+      geminiModel: env.GEMINI_MODEL || '',
+    })
+    if (!r.text) {
+      await sendMessage(token, chatId, 'Не расслышала голосовое 😅 Сервис расшифровки не ответил. Попробуй ещё раз — или напиши текстом!', isPrivate ? undefined : msg.message_id)
+      return
+    }
+    // расшифровка — главное содержание; подпись (если была) идёт дополнением
+    command = command ? `${r.text} ${command}` : r.text
+  }
 
   const tz = env.TIMEZONE || 'Europe/Moscow'
   const webAppUrl = env.WEB_APP_URL || DEFAULT_WEB_APP_URL
@@ -427,6 +457,32 @@ async function handleVisionTest(url: URL, env: Env): Promise<Response> {
     },
   )
   return json({ ok: !!reply, reply, attempts, ms: Date.now() - t0 })
+}
+
+// Тестовый сэмпл речи для /voice-test: espeak-ng «Привет Дария, какая завтра
+// погода?» → OGG/Opus 24k (base64 вшивается скриптом scripts/inject-voice-sample.py)
+const TEST_VOICE_B64 = 'T2dnUwACAAAAAAAAAACPtDjOAAAAAFvfGM8BE09wdXNIZWFkAQE4AcBdAAAAAABPZ2dTAAAAAAAAAAAAAI+0OM4BAAAAsa1oxQE9T3B1c1RhZ3MMAAAATGF2ZjYxLjcuMTAzAQAAAB0AAABlbmNvZGVyPUxhdmM2MS4xOS4xMDEgbGlib3B1c09nZ1MAAIC7AAAAAAAAj7Q4zgIAAACr6uysMgMDWS5FSTw+PVNPSUlGQ0JMSjtEOR0ePDc2ID46TURKQEdHQExGQ0s7M0RHPzseGx4f2P/+2P/+aIAKZk9atvmr1rhLr8BHdIZ1/UQwPais8b6+y8hAzUQOJ7an1cPOPhxBfDEqXCViusg+ACor2DXdXGj//gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABog06i1TNDhk5nojHsU4gBe3bP/izs7x5Xs/MrzwlDvgdaFOgvtHWiD+LWVuhFaJxNIOGxQsvT9A98oN20chdj5Fkxt3V+jxu7HKv4PpRMvVdd7J+T/NbyVIc2QYcrJ/F+fV+tXv54nmuMnZ4s22h4u4HtaKdLuj8ulzQbkADDNKni5MmCcLqKTdUv9tBRj6Joh1G/Vx+RNoc+mAwr0mqGpr1FJXPOobGt3+gYFFFyPdgzV6dhRFtt4LxMQWiC4S7lPFdig3bMO0aDJ/tTZ292wExn+TCu2hy/ybV2mE3vO1hEqsV1dAYeivSBa/mymG9v0c4oUR6fhmim1WmWjY2cGFB22sYnndblXeYDKiAdxsfMKGJl9TEH8853SNjrxD1+JSSmjD4aDNg7bqLW8lFhlKizb7+PaIMbBUQ05sIvg5ravCjMsTr55ELEaHpesqoUsiHPe+s7ubfqhzitgB7+oUn6yinztJewlB1ovnXawnZuYmifIo3zYk/Sf3QMkSER+pqsq/loljq74DTpLNqUInO3sRkB2gy89glaoJlqMoTsdvKfeZbxhG64rm0YMe7JSLEX1oY2e3J5uqPzY5DYbG9xYmNvaKpBLaL17T5b7qITdNlMRiK7wbYJ9T3rTPKPegm5qC8Z0kOcbx3v8xgmPoo7Ib+NxTF0L72W/IPWqLpcOHh7DTPFRcITFtIRt6N9lOBxbWi0NnTb5RZtAEbqtXszUTwrUfV9zMYsmB+OPSjJSYgT8H50pp3kaQBnb7QkhVjVKcpw365KUUON+4kgrbbwBuGsYgVWi0Oylt1op11HGM8slyCV43HeOxtkHsw3tHZ4Vr/395ZmdK8bomFYg1x4ww/yrgM+KFuBtNkvOneT3Qy7JcQlDH9zLQRLQWL5VQ/Yso/9aKmiWvuGLghHE3W5VT8Lb6QJ/TWT439jG/6BM6HQtjflruvme6BMqUiGWP56bNmce+GNLQb657o87coZLUyosVzN2dmDomip1VGlXUZDoDOEUM5WvLcOBk2ynaXC2dyahq109hgbjpvfDBncmEq0urTreS0xvhLtSJkKkvvO6EZd6MHk+jexIWZosAEB1B7/CooaAJp7W77AAVw673Mq8112M0YFgoEEW3zjGGnbZZe3nirJ39bvfG5c0bzDE7BpI8Ud8DO3iQxONtVorUOWPgmSI0xNXTXBtvRLq3sL8lApkM7UFzh26CaLlMHfz2tcm11+16P95aYwa+Ruy5akHvUnVOSn2L94RQdF5Q2NMnvsJX7GI+CEaLKaJ7sBMBbnuQr+vsROxlydCMVztTj1BULoo7fO+eAIBNHWBY7CM3yzcCUDUFSjfc+66majjCjNvo7bElJGGg/aDsOfo/4xtdFotzhvb/AIxgWXIeavEXnKyrsMyrNEh+8pNDTmo4fWzJquaeMZQSDLTYcunWQQi3km0YamsG8hvA5ehmi3rbPkBdCxV0+8t+Wu+SbA+n9H9mjEupWSW6D8tHucGj/BOcbp1AZeCGwD44W28XSK6EKGQoo2b8GRYdzEGGaOmritaIPQgBZhkXA5R2y4VHXMKhYy6TOncrAd5IK3AqWKteP9i3j8LOfOoauMg2PYqiR2/HtwjevUIpnCaDBjwR1NEgFMQvH76kn5cC5jW+HozgRwHvNLi4BoCwCu2maUi2vhPiIx0FtbyHmWuR4GyrtAvNULi4Nogi7adiap5rAsdgsi4PAcRHRczhUZGIgEvYh71j35s149l34oQ+MwPVF+/ehRpip1/7eL+iVJhjGt8oFokvCzLEMEfR7EYRA6Owr5R6yScOQjos7qlmWafZvic7EPne5KvHt/IISH5OTBAS5uy7bIXJ68aIPSf4mLM75uzAbuwpkXtX8GezlKNG+bVRGWaqv4AQe4YCVtMenafdyB02z1gnl0M7Bq4SHeaDQ1QR1NEgCmCBWxSxXVq2JBKDXYjGAhnfCQWYGRsaBogAvqze1MX0aloFC7Ix2l1Yu4Y+h2qsCGgmsyZkN9phDdYyEmRCx5/xbv4oORJaSzThYdBLrhVnkK4Byaj2iEzqFVjJJS9pfRAF9dkdEsTLaASp+pozlC8ZxjgZ+zNt+U3YS69ROzXycd/MfpyFVgt+d06b+QVb1orjXOXQQ2X9xF2E0n+m3hMsjXso06Sl2lWE3x9w8Chv4S7SIVB4Wxi9jVqmBx0RviHP4ccBgqLWYH19zWWPwS059dA85vuQcX4dIF8mi02bgtId+l1hpaDWlv//TyZoWIWHAukjUgOT0lG/H/+DvLILJgEovydsolY+De0AJSoy3eoT/+xzEQgkRwkKCgktFMaLABeoWh+4lYUsSm8d6iSkx+grvbiiw1byjwwexlQYHD1TRyXVncmgK9fK7ptwiYU7o7WM3TrZ3XOccKLJi5S76ke5yY0jRNx99oqREHeZ9JGFMX0hLqLouuYLXuHi8oHVO56WTEjVqBxi4F9x4s3pxbRYKTgFX0QAK606Xs0DexI6HklByW6NBHaK5ITegem2rAf1uid6OhJMfgxbL3uPHoRo+F/q9Ych68Sw8+e7/JVemi6hedAhdk4LnKQaVDtcp/50SX3iqgAyTs8XOq6rxoq/laycx9xHx/9mt7mjx4wzNFy6ZdNCX0jLyUyH44YUktrCDb5C+lbDDrFixJpHkKsclp3wd3gxTiP8jK4aAYFVf18ppx82iDSP9OBrK8Q5uJesONBX28rnciAs2hVkMmqnJei0+hkJtsgX6SXzB+qrbQ9qHqPNeoMw9yACKu5QVB6U/j0OpoobQgYz0hi6KhSim1JqQMn/nBYbuBcpibhtDz9CPQ/gGwtfS4q5KELhukKizOvXnC9wHDDSQc/hrNSA13Xb/QTEhx8BH+7chELkvlaLO7sKM4TWSJwW5ghd9DeOzbhO14ZxPxb5HIkNsJ51F1rhKJv7XUw4Rd9i+MQ4u36/oXzzuDfFgIFZpU8GBanFY1/gmeFGiuC1vYFGuyDu2qA3cVq1L+AM6MfBmOuEgXASKryeGCyM/L/gaZXze6gOtVq8uCcRxUr2nlhROeKd0nzMn2gV0O2jhops8Vf7RnG3RIK1JuEwUCWPyLwt5Tc+HMdUZ7AMH/pYkqbN4cE5m1EvFPtgyOHeD9hOHEASCF8M1KOgAOMC6WgCIT9ZK4Y0jsIRNoqz3r2WP7nQMPqHFfmkwLLmjER968YuWm8SnpI9ZJRC9cyGvjVPbJu202H+l/m/YGhhA318Kd78lVFGirPevTlp6qEFA9zOAp1yjEaZyfrGaVhuJxEVPprAY7Om3GyDOi7dvLdlnLnb+RkNaKl2iulBDZVoil9seQN43ngyKsdMEdzynfchnUq3K6KJMElcdPGI376CwwZkR0GVlNnPRYHHd4E33tgYVlndiFaR/y/4S4aK+u1jiXJX9bVOw19UoDWom1jipiq2UJ5m9m01C2PQFqrgjyPIEvDmHMRhRMECcMMeH9hFJ0fW1qm4MdCWOyLma0l0FfkaRoqpaDtCreAyQqEyge7gDQAyK42jAXY2iETvNlvJxqVSyRK4gw9VSy6mo0uyeV99c3wXbt7WskyM82O8YIZ65opezYYgQPRxCTLIm5v0zIFQRQa0S/P0/XB+Vzte7lv1ePiQ4TUDci0J+NrXXkExa7/mmLXviRSsEGH2gqqYEdTRIBoJUQlH+JHBoYyto3owzvt6oE80uLhGgIbqtIo75tyGekus5dI8Uu+pEZrtgLh6uLkGgH0KTFUwXtwfzI11snq7522zETDl46XkC81QuLmmgH0KTFUu1od0FAnjU1Ub0E9IcbFe/0tB2aC5Zri4hPZ2dTAAAAdwEAAAAAAI+0OM4DAAAAv7tRmjIeJSIfFhYWFjg/JT9BSiE8PSBERTNKTkhETEVCRT07P009M0A6Ozc2H1E6Q0VGP0pDP2gH0KTFJyIY+ke7CEOBF426yWW0FQ5RKgRU80uLkWgH0KTFI1j8rL92MiH6EsaLXtXMR5jhgESUV9glVjF0JPNLi5xoB9CkxSdGCBnPHLvG6uDidoy8PPhsaXJXPCoVQLzVC4uMaAfVGdUE99lWY9hZUqm+zboF6gZD9zRmkvUE80uLnGgHyXnIyVfAohIjdrn3CjW4HvNLi4hoB8l5yMlXwKISI4DZ9wo1rlnzS4uYaAfJecjJV8CiEiOA2fcKNa5Z80uLiGgHyXnIyVfAohIjivn3CjWuWfNLi5RogBgLyTE+6eyRQANoVINafY0M0un1pQYvxaKvbipxY8zd2OYtNt1YJaLnYHuVfCtjR6mTal03FGiEgSTzawK060WPpmjrmpKCZBTgoVoLDkmr6yg98u+vmVIUT3XpkjKqW+5gUM7QRgZevY8er+2jW6ct58JJvmiPhWBTsXU8/cSQ4EoWTjNvnZGID3031pcg/T152RfQWfNRsaBoggHH47bL8IJiOWmKqwlOn5i53S8yZSg3lyS+vie3wNjwjwg6jA0UQHTlHeZJZbyukM4McaUWpgaAJyu2rpxosDPNrT3hHWTAN/twP1Ko3MBdcP6t55n5KnlLmvjNiZXwZq7Wi2r4jYC3S101OoDG4E1uUL42nCUC5bXAdecArmi/D2ALsZWuK+cK/e9hbSqHOz/ZOc/LH238xbWl2Eroxl5cAzbcpDUIVDHaMP7eHYS+cCtuyAJRjRvpm/zrj5vtlY0jHgfn5IyGaDBjwR1NFUNx3RNxVTzZ6Cd4+yDqIc07P6vM8ASBkbGgaIAI5lc99DyDmLfxaLaHo5YbA0iEmmVAGd3erN5Zj0h/pF/Nej16Hnj3/hUd7IE3Mdl44IjeQb8Olra6aISDZWILfwpaRd+3vhhKYdXLm8xjuG9EwH1GqZYjUN1yGxPi4D77dFJPaxj8E8AAJLvWxFvqEpYFBXKqYmgGO8ABAL1S5lxkl13moK2TFG+08NFIkJR+XFGwWTNFaKCK76FDVmCuasA+jWWGO7kl9tdoRD3UUX7Xrn85WHI+fM8QsoBpUE1G47nkfVsnuy6jNps8CPQ+zYRRbmP+SNy8scRorzOPMeZwLZ0gi6izvFMZix1k8Z57s3eDfbN2abdLqoUckGB+teOb/ohWRKKXct2+3sFlXGHzP/XecyEGhkW+7o+ZVYposgeKy13Pk0ytPtUp4BXO7CKLoJGqrUFLlJdj5bbfKRbOSlY6C4KCrJxqA6M4Rp633Rtosy5EdEMKM5cOw6oamX8oqRlhUAOp2ibXS0Oi1Xtk3SCNyEKD1RSdIO++oxQmZrHVKOjiEYiky161UO1Lvlh6Onl6Cz3WObkFk2isfitx02SmW2ARJGqbtI2F266WG5CbynPxZt5F3Td6gH/SZ0hkjMsch19B+lXKv4W0qj87KrUxzO/fjn4tFDM0bBnj78wdabZ2AyXzEmitk0luuQFC7PCzs1ljdH0cQiCdcOzHdoWxAcKCjRF4Xh5aaMT+AlcdqiC0eIVCk+pCNv1HBwXJHL5DjQ1k2wW3WM42ylY11GiriJh1fWcgbh9dfVoQevEwhUtx6QduKjMVH7QcT8MQVQDQWNLHPFtb8eyjN4Go070kLVJmRDbFTJgUH7xHAGqSOOAcaK8gPQ49IjVGlVPCU5akHQNij0IC6coizrfXgJx9h7FZI2lfusabHFG2jt+emrDIPBSyeydboJzj0DA+p1WdyiWIqhX95wdQ1oglDWingVRAjoj3y6WPS+l7JwS8G5dCYSNPvESB1rDCDBna7h8xsYgYnL6+pkK3gVapMu8xNekyX2MMxiF9Y41GdC5DbqjN/Gi+D3g504HrZwdCxfbWnzeazWCZXgM78S9t4NJmXIJ2lpGTbp6iBrI30UnmckSFFuL8AO7sxHQ5VyoghquC4I/E0WiDbcnzfmWNH+ThvQfXjzwIYHAM1zaiuOudciSbtkKhWmteclS8/Pcn/wsv2maH0V2RiNVj3ZUHtLvUt+uwPFxdLxHwXWiUCg9ou+VAfA+s9Un+bQO5SlX3z5frJTOkTapA84Qs7HIUa/2eUnQ4R/xslnwlxrtTnrdXwvFLUWiN8ApolA/fPtQRgl1cOZukl6oR1+VWbw0O1FzbDrzYdV9GMQV/pbNEHy9jR1fH3uq6BKiONuAzstrrfezaRmiEmuuJObAzJATmpoQT6ql5d7EJla66g8YC3kK+lI/bs8Fy96hqSOzpxMkRnaBtRfRd3q8ddlxXtLynoRvNGGi0tMU1inD5tJXVRwqk7wGEcg8V/DlpeXTXErxlH/uQ2PQ5Y2IO/mY4q6LIHYioZftC1TEKmGwNNxFPgWNuUOWXVpMM7UonMPZF/6NyaK7JpIq4UEJDKDSTKlcZcOHLkhjCcjNl5mQLTjPM8Zqvt11uwNI2AnItsrQDuK2q6D4MHynMs5dXo1IndmixvqvhYCTlTgSal5jkaztmxvbQb6PfUu5p++E0SXXP6PqjKJQFpDu+9mBj9gkxZQTVj2ixdyIDfkm9AcrttCln6EPovZu6zDxYgZl/jgx8F5JqSAqhq1CGpWnGvelQ/4Y4TsPHszcGCO/gRMwlleJTzDNokLrRSsiNXbouZqmXlGBwoYYVi80zneSSWduMavgq+mI2QQT4F/OYhE67mM8of7qOaLv1PfAu6bBBaJGLkSMliL2JD//OpryXKP6ZgX1HXoc3H0i1Jy61jPJLuH3AkPFrBpAzZS4xU9x1dR6IFNf+cYkDM9xohGs3anUG26QfWRzxcQvKf1nAyek6Ha+6xS7A40ynhsPVYnogJ4JQ3ytonKaTmk0RdpX0wlIdaIQOokHkSmjByJ/ivTBRRnBkuokOCCDqqNWDnS/83VTtAULC00gaXStjmqtwpjYRilxBWhk8aAZFgAEEIvt9N6APWIcw66/SmblpJUqO7myx70RKbWi9sewxYxndVAGC7CWeJD19xASavB4qMwZQOHVU28NSS5euYMRq/bH7mjFr7ewsl3b+mYxXwWtlFPerhYxkNMa+jken14s7zTRbTg/QZHKXrGiUclq353fpYeI0IkNxZSD//AXDIqoMkFmI55vp52PFlqlBLpapCWfZhXof3bz6QDfUQ3B3lSd9/5RohIQSdPb1K4I1vconZMZWIHPnMEJCkxPu8yn9xxefiOq5qoV/p8cAuoUZQrek8rjiUT0noiyB42YIzbtT8xcwI0FJaK3v+fb7sjyT28o7p8vrxg08DL/Zl2rQsNxD+r9xQIKlKw0DBNYVAr8/UtKiOBPksio5a01fPdSv3LDPJqJS2v8xc1RQaKaaYOGv3DgOdY+oehotnnrlTuV0/m51vJz0sJxiuHSQEJZb8DyH8cw/JkRYwCt/tnwYj7yvob33ON6VqabBUC2Wnxr/FWiqgHenJn4Tq0Jdj2ULqaevngxmSLERvkE56jc4zQBb9HQvcSTAUNRsNKUJzguLvyec12zQs2X54OqpYqsc62izBt0PYjYMs3NOF7MnwFotfhDchVb1/vUGbcI/zLSLjGWvoRANbqYIsKTFxhRTCA3c4MNNDiyyb632ynEGI1/MNIvUMVp0MP4SaKh5WrFlM/8HHKdf3kHyteJ3pg/CYJ+/jAVCMj+g/8NNwaCNIMpA7KUG3ZyiezrwgQhqn35pVegSLAVWLYQE38QTCmitkNwgmiwp0qVr1kOS4Bp0UhN1yyXBJ+r4EC+diPQ3zMGDS4CAEOeAdoq87kIzSXZHo77oQMjmlMuYo69hRE9nZ1MABLwbAgAAAAAAj7Q4zgQAAAA65KPkLDEjK0QzS0d6N0NDTkg5OzVJTkdEOTxOHBogIiAgJB4WFxYWFhYWFhYWFhYWaKxbNQUqPUcFMRSVQ8ybNrpk6eGvEEbzQMq11nA9jlm+P4mBaAdhqYzzGZrx9L8jtWg27nB5rCsSDOenZi24aaZyAiv4KKTo0JTZc1vd7c0Wa4uAaIZMVSTu+jp6n2MhUYLu2rP/rMQ7ueasODHcD5pscYCA+gxO9qaEoEg0ZGiDrMO5Xf/swpCRMM0bh8/lEI3WQPYo4MIpTxljQlX1iytLd6inl8RHIr/mEzRNFjeTu7XlywrB/mJVI+c6asIujNE+aKNACIjuTgboS1NlMstU345ewtQCe2F1fjDqbqFtsuz5q/+4lB3JdTlcpDBoSXTu2NCGaKudkzLTpnPDItrk0HQLWQdY6eZHwJr0Xx2kGYCu5gusySARxzYpZm74MjG/48mCdvu7EFNLTwmrwDI6L58+u30P+BMf8Nxy8Hb+aLFTsQ0kzryG0TeC2ngMpL86b6IUjtppE5hKXdoLdaa7WM+x1JgEY2g7uehjw8vyyX9KC0XlqFYbmUDdCKgaHzeS3mO0kTZonF3Ub0oQPeca6NFI5QVZPYjnhSfS/54VM9g34aP5T37LHqML31wDDLfmsio1IZKhOJFIkVPvIO5Ajl3OaEiun7KZHqWiFksIEHeJL71It+p0QRBiGVa50BN26Ovq4uWm4Lr6J0ZjMUnEOd0bF3tGAiJS5kOWAvsu9GiZXWna/NeMB31E6IVYo0m10Bk+/pqBdqDj8GDlBHEnNQkA1l4pJmMBCJTwZTNx8o3Bf6sjRetoqIpKRbPmeiflPurNZYiClUS/T5KtNo4YZvueQmrP37g6cUXGYMQE4rRNHQ8tuFKFWkCEcew4NFS40/wC8hEVNDf2aIOjG6ipt53XHwKCQQHkvnh7dCUQ/oBYjqHIrtWcrlx+ls9hZL8OfpYFmuE28DEaLzPXPZQuwnslVhX2PtRh8to2bWiqO00cA0ILeYwV00J9BdeOPYOSNwNsRXS9FLl99K0sik73nLjQoDxyWablFRyqQplfBZVRtGP1zR1sldsgcT3aciFg42l40PhLMiY5wmizLVHkMEu/ILKtmmgeKQXWgoSatpFjDgDThngjdToqVSOO9WbDAefA28KPD6FvHoUgmweI0BGpImFtJaWEF3fJWsJYpLCFt2isra0syO+/2qv/QLOMVuiQLDJLMAntn8k3Q2lJ2/qXxF7Sb3gcUotd0rlubclpBrxsxsfESqRrwWimwHzHcRfqWxpQIAcBkvCZSdFIX31ow5aIE9RbdLFUJ55wSG37vxadAiKncEHgE9gS9g8TUmFG8vFWaL458A7EUW3tSKgjxlH3KmQtHoZbJPgRWDejYDtilQXESajMJ9oPZ9814fxDFx5GrtPGKshomQb3pfpW8+HheI3rQPGxp1ma+I7PsRQjVQqe5g+YHgGB6a/oXQ6zCnYkPm/GR0IX/RgunqSP76/n1U44G2Bl3BQElRnpkg5CaJkFQEx2SUFofEFsqcds5uaMjBfQ7m7sn+ME7As/2johVdZQnRjOIRRb1rMQqz8tGb9+KY2IBQOIBRGqVmy5zrJMn0C5J5zBDbvFJm6OaLayxsNxSZ54jIW+9iFBuWZbW6xYmkOR/dgFyJl+idAb47D3jmB32ukzVjVRAmFiBGDQGurhJ4i3TmsgpzqCeRTub4nefKBoq5BUyNLsPTTHsPvXOwwfYv2BPSKcHwp9VsepTUQcYV+Uj2FbcZ0ZLaajEw3uuKQmeYgpwCTZMI0ZbfUuD2IZ977ObGixfFdgiAN+uFzx4zl2/MW/DNJiBecDUOs3b5VuIYk8lNqudBNe/UzB5WKICzs244554F8pJ7vu42iuF/AuhZ/19s/+A83kOwf0KAum1BIb0HoSjrfJCU+j37ldJxr+kfxIEmfaarvhzfAgc+OiRXFrKuGX6Gi+t0AG3Dl0n8NpnSEpReP52vcMPhRN1brhrcrJMOvNStx7d+yuYQFoBu12Ni6wgDM7yJ+aBuWKKZXfKodXBkugjiNS6Rgdm9L6VDidRWgqqYAAxEYU2g7pJWqxRsHBNipMiwYyBPNLi4BoCG6rSIsGH9cEE6HfVeSyJseP8AkblmuLlGgH0KTFVAe15XUgiqKiw1IrNYWJRCzN+Oe/4LzVC4uaaAfQpMUjWPXVhkAwgKjqRPIZqEk97oNGfiu1I1Qe80uLiGgH0KTFJdIRN06DAMKPAuVwsQljxhHHutiPXFnzS4uSaAfBorCtHWCliWFNb082XonqwF2b2AIBSl4AWfNLi4BoB9CkxSXjYqD2usb1hurQPmwg2eZswcb4t2PDmpIfpPNLi4xoB9UZ25p0+FWhE8HcHX9o9wT84cETQPFnJPNLi5xoB8lyJ+FE6lXx8L2AAOk7ALzVC4uMaAfJecU0+sAmSB9Anmdu4OaLK4eri5hoB8l5yMlXwKISI4DZ9wo1uB7zS4uIaAfJecjJV8CiEiOK+fcKNbge80uLmGgHyXnIyVfAohIjivn3CjW4HvNLi4RoB8l5yMlXwKISI5UZ9wo1uB7zS4uUaAfJecjJV8CiEiOVGfcKNbge80uLhGgHyXnIyVfAohIjnzn3CjWuWfNLi5BoB8l5yMlXwKISI5859wo1rlnzS4uAaAfJecjJV8CiEiOpWfcKNa5Z80uLjGgHyXnIyVfAohIjs3n3CjWuWfNLi5xoB8l5yMlXwKISI7N59wo1uB7zS4uMaAfJecjJV8CiEiO9mfcKNbge80uLmA=='
+
+/** Кто из мозгов реально расшифровывает речь: transcribeAudio на вшитом сэмпле */
+async function handleVoiceTest(url: URL, env: Env): Promise<Response> {
+  const json = (obj: any, status = 200) =>
+    new Response(JSON.stringify(obj, null, 2), {
+      status,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    })
+  const key = env.SEARCH_TEST_KEY || ''
+  if (key && url.searchParams.get('key') !== key) return json({ ok: false, error: 'неверный key' }, 403)
+  const attempts: any[] = []
+  const t0 = Date.now()
+  const r = await transcribeAudio(TEST_VOICE_B64, 'audio/ogg', {
+    coarenaKey: env.COARENA_API_KEY || '',
+    openrouterKey: env.OPENROUTER_API_KEY || '',
+    geminiKey: env.GEMINI_API_KEY || '',
+    geminiBaseUrl: env.GEMINI_BASE_URL || '',
+    geminiModel: env.GEMINI_MODEL || '',
+    debug: attempts,
+  })
+  return json({ ok: !!r.text, text: r.text || '', model: r.model || '', tried: r.tried, lastError: r.lastError || '', attempts, ms: Date.now() - t0 })
 }
 
 async function handleLlmTest(url: URL, env: Env): Promise<Response> {
@@ -692,6 +748,7 @@ export default {
     if (url.pathname === '/llm-test' && request.method === 'GET') return handleLlmTest(url, env)
     if (url.pathname === '/image-test' && request.method === 'GET') return handleImageTest(url, env)
     if (url.pathname === '/vision-test' && request.method === 'GET') return handleVisionTest(url, env)
+    if (url.pathname === '/voice-test' && request.method === 'GET') return handleVoiceTest(url, env)
     if (url.pathname === '/telegram-webhook' && request.method === 'POST') return handleWebhook(request, env, ctx)
     return new Response('not found', { status: 404 })
   },
