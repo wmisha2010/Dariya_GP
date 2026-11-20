@@ -29,6 +29,8 @@ import {
   timeLookup,
   resetGeminiBreaker,
   resetCoarenaBreaker,
+  withImageParts,
+  VISION_OPENROUTER,
 } from './src/brain.js'
 
 let passed = 0
@@ -603,6 +605,126 @@ console.log('── Рисование: интент «нарисуй …» и g
       !r.image && typeof r.error === 'string' && Array.isArray(r.tried) && r.tried.length >= 3)
     check('без ключа → сразу честный отказ',
       !(await geminiImage('кот', { geminiKey: '' })).image)
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+  }
+}
+
+console.log('── Зрение: фото в askLLM (coarena/gemini/openrouter) ──')
+{
+  const history = [
+    { role: 'user', content: 'привет' },
+    { role: 'assistant', content: 'Привет!' },
+    { role: 'user', content: 'что это?' },
+  ]
+  const plain = withImageParts(history, null)
+  check('без фото — сообщения как были', plain === history)
+  const out = withImageParts(history, { b64: 'ABC'.repeat(50), mime: 'image/jpeg' })
+  check('с фото: последняя user-реплика = [текст + image_url data-URL]',
+    Array.isArray(out[2].content) && out[2].content[0].type === 'text'
+    && out[2].content[1].type === 'image_url'
+    && out[2].content[1].image_url.url.startsWith('data:image/jpeg;base64,ABC'))
+  check('остальные реплики не тронуты',
+    out[0].content === 'привет' && out[1].content === 'Привет!')
+}
+{
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  const b64 = 'ABC'.repeat(60)
+  let captured = null
+  // Coarena принимает фото: body.messages[last user].content — массив с image_url
+  globalThis.fetch = async (url, init) => {
+    const u = String(url)
+    if (u.includes('coarena.ai/api/v1/chat/completions')) {
+      captured = JSON.parse(init.body)
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'Это красный квадрат' } }] }), { status: 200 })
+    }
+    return new Response('unexpected', { status: 500 })
+  }
+  try {
+    resetCoarenaBreaker()
+    const reply = await askLLM(
+      [{ role: 'user', content: 'что на фото?' }],
+      { coarenaKey: 'k', photo: { b64, mime: 'image/jpeg' } },
+    )
+    const last = captured?.messages?.[captured.messages.length - 1]
+    check('coarena: фото ушло в image_url, ответ получен',
+      reply === 'Это красный квадрат' && Array.isArray(last?.content)
+      && last.content[1]?.image_url?.url === `data:image/jpeg;base64,${b64}`)
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+  }
+}
+{
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  const b64 = 'XYZ'.repeat(60)
+  let orBody = null
+  let orModels = null
+  let coarenaCalls = 0
+  // Coarena не умеет vision (400×3), OpenRouter выручает: модели включают vision-цепочку
+  globalThis.fetch = async (url, init) => {
+    const u = String(url)
+    if (u.includes('coarena.ai')) { coarenaCalls += 1; return new Response('no vision', { status: 400 }) }
+    if (u.includes('openrouter.ai')) {
+      orBody = JSON.parse(init.body)
+      orModels = orBody.models
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'На фото кот' } }] }), { status: 200 })
+    }
+    return new Response('unexpected', { status: 500 })
+  }
+  try {
+    resetCoarenaBreaker()
+    const reply = await askLLM(
+      [{ role: 'user', content: 'кто это?' }],
+      { coarenaKey: 'k', openrouterKey: 'ok', photo: { b64, mime: 'image/jpeg' } },
+    )
+    const last = orBody?.messages?.[orBody.messages.length - 1]
+    check('openrouter: vision-модели в цепочке + картинка в сообщении',
+      reply === 'На фото кот' && orModels?.includes(VISION_OPENROUTER[0])
+      && Array.isArray(last?.content) && last.content[1]?.image_url?.url.includes(b64))
+    // два фото-провала подряд → текстовый вызов всё ещё долбит Coarena (автомат
+    // не сработал). 3 вызова × 3 модели цепочки = 9 запросов к coarena.ai
+    await askLLM([{ role: 'user', content: 'ещё фото' }], { coarenaKey: 'k', openrouterKey: 'ok', photo: { b64, mime: 'image/jpeg' } })
+    await askLLM([{ role: 'user', content: 'обычный вопрос' }], { coarenaKey: 'k', openrouterKey: 'ok' })
+    check('фото-провалы не включают «автомат»: Coarena опрошена и в текстовом вызове',
+      coarenaCalls === 9)
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+  }
+}
+{
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  const b64 = 'Q'.repeat(180)
+  let gemBody = null
+  // Gemini native-путь: inlineData в последней user-реплике
+  globalThis.fetch = async (url, init) => {
+    const u = String(url)
+    if (u.includes('generativelanguage')) {
+      gemBody = JSON.parse(init.body)
+      return new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: 'Кот на подоконнике' } ] } }],
+      }), { status: 200 })
+    }
+    return new Response('unexpected', { status: 500 })
+  }
+  try {
+    resetGeminiBreaker()
+    const reply = await askLLM(
+      [{ role: 'user', content: 'опиши' }],
+      { geminiKey: 'gk-test', photo: { b64, mime: 'image/jpeg' } },
+    )
+    const parts = gemBody?.contents?.[0]?.parts
+    check('gemini: inlineData с картинкой в последней реплике',
+      reply === 'Кот на подоконнике' && parts?.length === 2
+      && parts[1]?.inlineData?.data === b64 && parts[1]?.inlineData?.mimeType === 'image/jpeg')
   } finally {
     globalThis.fetch = realFetch
     console.error = realErr

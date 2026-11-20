@@ -1018,6 +1018,25 @@ export function resetGeminiBreaker() {
  * opts.webContext — блок с результатами веб-поиска (см. formatSearchContext).
  * Возвращает текст ответа или null, если ни один провайдер не ответил.
  */
+/** Бесплатные vision-модели OpenRouter (живой список API, 2026-11): с фото
+ *  идём к ним, если базовая модель арены картинку не взяла. */
+export const VISION_OPENROUTER = ['google/gemma-4-31b-it:free', 'nvidia/nemotron-3.5-super-vl:free']
+
+/** OpenAI-мультимодальный формат: последняя реплика пользователя превращается
+ *  в массив [текст + картинка data-URL]. Без фото — сообщения как были. */
+export function withImageParts(messages, photo) {
+  if (!photo?.b64) return messages
+  const lastUserIdx = messages.map((m) => m.role).lastIndexOf('user')
+  if (lastUserIdx < 0) return messages
+  return messages.map((m, i) => (i === lastUserIdx ? {
+    role: 'user',
+    content: [
+      { type: 'text', text: m.content },
+      { type: 'image_url', image_url: { url: `data:${photo.mime || 'image/jpeg'};base64,${photo.b64}` } },
+    ],
+  } : m))
+}
+
 export async function askLLM(history, opts = {}) {
   const openrouterKey = opts.openrouterKey || ''
   const geminiKey = opts.geminiKey || ''
@@ -1054,7 +1073,8 @@ export async function askLLM(history, opts = {}) {
           },
           body: JSON.stringify({
             model,
-            messages: [{ role: 'system', content: system }, ...history],
+            // фото (v0.3.24): OpenAI-мультимодальный формат — картинка в data-URL
+            messages: [{ role: 'system', content: system }, ...withImageParts(history, opts.photo)],
             temperature: 0.9,
             // 500 → 1024 (v0.3.21): ответ обрывался на ~500 токенах; длинные
             // куски дальше доотправляет разбивка sendMessage (лимит 4096)
@@ -1068,20 +1088,26 @@ export async function askLLM(history, opts = {}) {
           const raw = data?.choices?.[0]?.message?.content?.trim()
           const text = stripToolCallMarkup(raw)
           if (text) {
+            opts.debug?.push({ brain: 'coarena', model, ok: true })
             coarenaBreaker.fails = 0 // успех — сбрасываем счётчик провалов
             return text
           }
+          opts.debug?.push({ brain: 'coarena', model, ok: false, why: 'пустой ответ' })
           console.error(`[coarena] ${model}: пустой ответ после зачистки`)
         } else {
           const err = await res.text().catch(() => '')
+          opts.debug?.push({ brain: 'coarena', model, ok: false, why: `HTTP ${res.status}` })
           console.error(`[coarena] ${model}: HTTP ${res.status} ${err.slice(0, 200)}`)
         }
       } catch (e) {
+        opts.debug?.push({ brain: 'coarena', model, ok: false, why: 'сеть/таймаут' })
         console.error(`[coarena] ${model}: ${e?.message || e}`)
       }
     }
-    // Дошли до конца цикла — ни одна модель не ответила, учитываем провал
-    coarenaBreaker.fails += 1
+    // Дошли до конца цикла — ни одна модель не ответила, учитываем провал.
+    // Фото — исключение (v0.3.24): модели арены могут просто не уметь vision,
+    // это не значит, что текстовый мозг умер, — «автомат» не включаем.
+    if (!opts.photo) coarenaBreaker.fails += 1
     if (coarenaBreaker.fails >= COARENA_BREAKER_AFTER) {
       console.error(
         `[coarena] ${COARENA_BREAKER_AFTER} провала подряд — ${COARENA_BREAKER_COOLDOWN_MS / 1000} с отвечаем через запасных`,
@@ -1103,6 +1129,7 @@ export async function askLLM(history, opts = {}) {
   const bridgeKey = /^sk-/.test(geminiKey)
   if (geminiKey && (bridgeMode || !bridgeKey) && Date.now() >= geminiBreaker.skipUntil) {
     const base = (opts.geminiBaseUrl || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '')
+    const lastUserIdx = history.map((m) => m.role).lastIndexOf('user')
     const models = [...new Set([opts.geminiModel || 'gemini-3.6-flash', ...GEMINI_FALLBACKS])]
     for (const model of models) {
       try {
@@ -1113,9 +1140,12 @@ export async function askLLM(history, opts = {}) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               systemInstruction: { parts: [{ text: system }] },
-              contents: history.map((m) => ({
+              contents: history.map((m, i) => ({
                 role: m.role === 'assistant' ? 'model' : 'user',
-                parts: [{ text: m.content }],
+                // фото (v0.3.24): inlineData в последней реплике пользователя
+                parts: opts.photo?.b64 && i === lastUserIdx && m.role === 'user'
+                  ? [{ text: m.content }, { inlineData: { mimeType: opts.photo.mime || 'image/jpeg', data: opts.photo.b64 } }]
+                  : [{ text: m.content }],
               })),
               // 2048: у thinking-моделей часть бюджета съедают размышления —
               // с 500 токенами ответ мог обрезаться до пустоты
@@ -1131,20 +1161,25 @@ export async function askLLM(history, opts = {}) {
           const raw = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim()
           const text = stripToolCallMarkup(raw)
           if (text) {
+            opts.debug?.push({ brain: 'gemini', model, ok: true })
             geminiBreaker.fails = 0 // успех — сбрасываем счётчик провалов
             return text
           }
+          opts.debug?.push({ brain: 'gemini', model, ok: false, why: 'пустой ответ' })
           console.error(`[gemini] ${model}: пустой ответ после зачистки`)
         } else {
           const err = await res.text().catch(() => '')
+          opts.debug?.push({ brain: 'gemini', model, ok: false, why: `HTTP ${res.status}` })
           console.error(`[gemini] ${model}: HTTP ${res.status} ${err.slice(0, 200)}`)
         }
       } catch (e) {
+        opts.debug?.push({ brain: 'gemini', model, ok: false, why: 'сеть/таймаут' })
         console.error(`[gemini] ${model}: ${e?.message || e}`)
       }
     }
-    // Дошли до конца цикла — ни одна модель не ответила, учитываем провал
-    geminiBreaker.fails += 1
+    // Провал учитываем только для текста: фото могли не увидеть (нет vision),
+    // а текстовый мозг при этом здоров
+    if (!opts.photo) geminiBreaker.fails += 1
     if (geminiBreaker.fails >= GEMINI_BREAKER_AFTER) {
       console.error(
         `[gemini] ${GEMINI_BREAKER_AFTER} провала подряд — ${GEMINI_BREAKER_COOLDOWN_MS / 1000} с отвечаем только через OpenRouter`,
@@ -1154,9 +1189,13 @@ export async function askLLM(history, opts = {}) {
     }
   }
 
-  // OpenRouter — запасной мозг (бесплатные модели, бывают капризными)
+  // OpenRouter — запасной мозг (бесплатные модели, бывают капризными).
+  // С фото (v0.3.24) базовая модель может не принимать картинки — после неё
+  // перебираем бесплатные vision-модели (живой список API, 2026-11).
   if (openrouterKey) {
-    const models = [primary, ...OPENROUTER_CHAIN.filter((m) => m !== primary)]
+    const models = opts.photo?.b64
+      ? [...new Set([primary, ...VISION_OPENROUTER])]
+      : [primary, ...OPENROUTER_CHAIN.filter((m) => m !== primary)]
     try {
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
@@ -1167,7 +1206,7 @@ export async function askLLM(history, opts = {}) {
         },
         body: JSON.stringify({
           models,
-          messages: [{ role: 'system', content: system }, ...history],
+          messages: [{ role: 'system', content: system }, ...withImageParts(history, opts.photo)],
           temperature: 0.9,
           // 1024 (v0.3.21): с 500 ответ запасного мозга обрывался на полуслове
           max_tokens: 1024,
@@ -1179,8 +1218,13 @@ export async function askLLM(history, opts = {}) {
         const raw = data?.choices?.[0]?.message?.content?.trim()
         // Модель могла «вызвать» поиск сырым тегом — зачищаем; пусто после зачистки → без ответа
         const text = stripToolCallMarkup(raw)
-        if (text) return text
+        if (text) {
+          opts.debug?.push({ brain: 'openrouter', model: data?.model || '', ok: true })
+          return text
+        }
+        opts.debug?.push({ brain: 'openrouter', model: data?.model || '', ok: false, why: 'пустой ответ' })
       } else {
+        opts.debug?.push({ brain: 'openrouter', model: '', ok: false, why: `HTTP ${res.status}` })
         console.error(`[openrouter] HTTP ${res.status}`)
       }
     } catch { /* оба провайдера недоступны */ }

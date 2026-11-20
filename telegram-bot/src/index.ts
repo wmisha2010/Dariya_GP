@@ -49,7 +49,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.23 (brain v3.3)'
+const VERSION = 'v0.3.24 (brain v3.4)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -124,11 +124,39 @@ async function sendPhoto(token: string, chatId: number, b64: string, mime: strin
   return fetch(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', body: form })
 }
 
+/** Фото из Telegram → base64: getFile даёт file_path, файл качаем с file-сервера
+ *  и кодируем по частям (String.fromCharCode не любит огромные спреды). */
+async function photoToB64(token: string, sizes: any[]): Promise<{ b64: string; mime: string } | null> {
+  try {
+    const best = sizes[sizes.length - 1] // последний элемент — самый крупный размер
+    const meta = await fetch(
+      `https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(best.file_id)}`,
+      { signal: AbortSignal.timeout(10000) },
+    )
+    const file: any = await meta.json()
+    const path = file?.result?.file_path
+    if (!path) return null
+    const res = await fetch(`https://api.telegram.org/file/bot${token}/${path}`, { signal: AbortSignal.timeout(15000) })
+    if (!res.ok) return null
+    const buf = new Uint8Array(await res.arrayBuffer())
+    let bin = ''
+    for (let i = 0; i < buf.length; i += 0x8000) {
+      bin += String.fromCharCode(...buf.subarray(i, i + 0x8000))
+    }
+    return { b64: btoa(bin), mime: 'image/jpeg' } // фото Telegram всегда отдаёт JPEG
+  } catch (e) {
+    console.error('[photo] не удалось скачать:', e)
+    return null
+  }
+}
+
 // ── Обработка апдейта ────────────────────────────────────────────────────
 
 async function handleMessage(msg: any, env: Env): Promise<void> {
-  const text: string | undefined = msg?.text
-  if (!text) return
+  // Фото (v0.3.24): msg.text отсутствует — вопрос в подписи (или дефолтный)
+  const isPhoto = Array.isArray(msg?.photo) && msg.photo.length > 0
+  const text: string = (msg?.text || msg?.caption || '').trim()
+  if (!text && !isPhoto) return
 
   const isPrivate = msg.chat?.type === 'private'
   const chatId: number = msg.chat?.id
@@ -148,6 +176,8 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
     else if (replyToBot) command = withoutMention.trim()
     else return // не к нам обращение — молчим
   }
+  // Голое фото без подписи — дефолтный вопрос
+  if (isPhoto && !command) command = 'Что на этом фото? Опиши подробно и живо.'
 
   const tz = env.TIMEZONE || 'Europe/Moscow'
   const webAppUrl = env.WEB_APP_URL || DEFAULT_WEB_APP_URL
@@ -162,8 +192,9 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   // История диалога (для веб-поиска, рисования и LLM)
   const history = chatHistory.get(chatId) ?? []
 
-  // 1б) Рисование (v0.3.22): «нарисуй …» — это image-модель, не текстовый LLM
-  const imagePrompt = extractImageIntent(command)
+  // 1б) Рисование (v0.3.22): «нарисуй …» — это image-модель, не текстовый LLM.
+  // Для ФОТО интент не проверяем: пришла картинка — её смотрим, а не рисуем.
+  const imagePrompt = isPhoto ? null : extractImageIntent(command)
   if (imagePrompt) {
     const r = await geminiImage(imagePrompt, {
       geminiKey: env.GEMINI_API_KEY || '',
@@ -182,8 +213,17 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   }
 
   // 2) Свободные темы — через LLM (Coarena → Gemini → OpenRouter)
+  // Фото (v0.3.24): getFile → скачать файл → base64; без подписи вопрос дефолтный
+  let photo: { b64: string; mime: string } | null = null
+  if (isPhoto) {
+    photo = await photoToB64(token, msg.photo)
+    if (!photo && !text) {
+      await sendMessage(token, chatId, 'Не смогла открыть картинку — Telegram не отдал файл 🙈 Попробуй ещё раз!', isPrivate ? undefined : msg.message_id)
+      return
+    }
+  }
   const prevUserTexts = history.filter((h) => h.role === 'user').map((h) => h.content).slice(-4)
-  history.push({ role: 'user', content: text }) // в контекст — исходная фраза
+  history.push({ role: 'user', content: command }) // в контекст — итоговый вопрос (фото или подпись)
   while (history.length > HISTORY_MAX_TURNS * 2) history.shift()
   chatHistory.set(chatId, history)
 
@@ -191,8 +231,9 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   // только по ключевым словам — владелец попросил «хоть что спрошу — должна
   // посмотреть»). Модель сама игнорирует нерелевантные результаты (болтовня).
   // Погода без города («А погода?») — берём город из предыдущих реплик диалога.
+  // Голое фото без подписи пропускаем поиск: «что на этом фото» — шум в выдаче.
   let webContext = ''
-  if ((env.WEB_SEARCH || '') !== 'off') {
+  if ((env.WEB_SEARCH || '') !== 'off' && !(isPhoto && !text)) {
     try {
       const seed = withCityContext(command, prevUserTexts)
       const results = await webSearch(buildSearchQuery(seed))
@@ -210,6 +251,7 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
     geminiModel: env.GEMINI_MODEL || '',
     webContext,
     tz,
+    photo: photo || undefined,
   })
 
   let reply: string
@@ -353,6 +395,38 @@ async function handleImageTest(url: URL, env: Env): Promise<Response> {
     return json({ ...info, sentTo: sendTo, sent: sent.ok })
   }
   return json(info)
+}
+
+// Тестовая картинка для /vision-test: 64×64 красный квадрат PNG (сгенерирован PIL)
+const TEST_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAUElEQVR42u3PQREAAAQAMATRP5QwUni42xospzs+q3hOQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBA4N4CCJ0BmOb2hBcAAAAASUVORK5CYII='
+
+/** Кто из мозгов реально видит картинки: askLLM с фото + debug-отчёт попыток */
+async function handleVisionTest(url: URL, env: Env): Promise<Response> {
+  const json = (obj: any, status = 200) =>
+    new Response(JSON.stringify(obj, null, 2), {
+      status,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    })
+  const key = env.SEARCH_TEST_KEY || ''
+  if (key && url.searchParams.get('key') !== key) return json({ ok: false, error: 'неверный key' }, 403)
+  const question = (url.searchParams.get('q') || 'Какого цвета квадрат на картинке? Ответь одним словом.').trim()
+  const attempts: any[] = []
+  const t0 = Date.now()
+  const reply = await askLLM(
+    [{ role: 'user', content: question }],
+    {
+      coarenaKey: env.COARENA_API_KEY || '',
+      coarenaModel: env.COARENA_MODEL || '',
+      openrouterKey: env.OPENROUTER_API_KEY || '',
+      openrouterModel: env.OPENROUTER_MODEL || '',
+      geminiKey: env.GEMINI_API_KEY || '',
+      geminiBaseUrl: env.GEMINI_BASE_URL || '',
+      geminiModel: env.GEMINI_MODEL || '',
+      photo: { b64: TEST_PNG_B64, mime: 'image/png' },
+      debug: attempts,
+    },
+  )
+  return json({ ok: !!reply, reply, attempts, ms: Date.now() - t0 })
 }
 
 async function handleLlmTest(url: URL, env: Env): Promise<Response> {
@@ -617,6 +691,7 @@ export default {
     if (url.pathname === '/search-test' && request.method === 'GET') return handleSearchTest(url, env)
     if (url.pathname === '/llm-test' && request.method === 'GET') return handleLlmTest(url, env)
     if (url.pathname === '/image-test' && request.method === 'GET') return handleImageTest(url, env)
+    if (url.pathname === '/vision-test' && request.method === 'GET') return handleVisionTest(url, env)
     if (url.pathname === '/telegram-webhook' && request.method === 'POST') return handleWebhook(request, env, ctx)
     return new Response('not found', { status: 404 })
   },
