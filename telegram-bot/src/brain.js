@@ -714,6 +714,32 @@ export function formatSearchContext(results, query) {
 
 const YOUTUBE_LINK_RE = /(https?:\/\/)?(www\.)?(youtube\.com\/\S+|youtu\.be\/\S+)/i
 
+/** Лимит Telegram на одно сообщение (sendMessage) — 4096 символов UTF-16 */
+export const TG_MSG_LIMIT = 4096
+
+/** Длинный ответ → несколько сообщений: режем по концу абзаца → переносу
+ *  строки → пробелу → жёстко. Дефолт 4000 (запас до лимита Telegram),
+ *  чтобы даже кусок с эмодзи-парными символами точно прошёл. */
+export function splitTelegramMessage(text, limit = 4000) {
+  const t = String(text || '')
+  if (!t) return []
+  if (t.length <= limit) return [t]
+  const chunks = []
+  let rest = t
+  while (rest.length > limit) {
+    const window = rest.slice(0, limit + 1)
+    const para = window.lastIndexOf('\n\n')
+    const line = window.lastIndexOf('\n')
+    const space = window.lastIndexOf(' ')
+    const cut = para > limit * 0.4 ? para : line > limit * 0.4 ? line : space > limit * 0.4 ? space : limit
+    if (cut <= 0) cut = limit // разрез в позиции 0 → пустой кусок → вечный цикл
+    chunks.push(rest.slice(0, cut).replace(/\s+$/, ''))
+    rest = rest.slice(cut).replace(/^\s+/, '')
+  }
+  if (rest) chunks.push(rest)
+  return chunks
+}
+
 /** Поиск не был — убираем ложное «погуглила», чтобы Дария не врала */
 export function fixFalseGoogled(text) {
   if (!text || !/погуглил/i.test(text)) return text
@@ -915,7 +941,9 @@ export async function askLLM(history, opts = {}) {
             model,
             messages: [{ role: 'system', content: system }, ...history],
             temperature: 0.9,
-            max_tokens: 500,
+            // 500 → 1024 (v0.3.21): ответ обрывался на ~500 токенах; длинные
+            // куски дальше доотправляет разбивка sendMessage (лимит 4096)
+            max_tokens: 1024,
           }),
           // 20 с на модель: арена не должна съесть весь 30-секундный фон Telegram
           signal: AbortSignal.timeout(20000),
@@ -1026,7 +1054,8 @@ export async function askLLM(history, opts = {}) {
           models,
           messages: [{ role: 'system', content: system }, ...history],
           temperature: 0.9,
-          max_tokens: 500,
+          // 1024 (v0.3.21): с 500 ответ запасного мозга обрывался на полуслове
+          max_tokens: 1024,
         }),
         signal: AbortSignal.timeout(25000),
       })

@@ -12,6 +12,7 @@ import {
   buildSearchQuery,
   newsSearch,
   parseNewsRss,
+  splitTelegramMessage,
   parseDdgHtml,
   parseDdgLiteHtml,
   parseBingHtml,
@@ -488,6 +489,26 @@ console.log('── Новости: Google News RSS вместо статей В
   } finally {
     globalThis.fetch = realFetch
   }
+}
+
+console.log('── Длинные ответы: разбивка под лимит Telegram (4096) ──')
+{
+  check('короткий текст → один кусок без изменений',
+    JSON.stringify(splitTelegramMessage('Привет, я Дария')) === JSON.stringify(['Привет, я Дария']))
+  check('пустая строка → без кусков', splitTelegramMessage('').length === 0)
+  const long = Array.from({ length: 60 }, (_, i) =>
+    `Абзац номер ${i}: и вот довольно длинное предложение про жизнь, погоду и всё на свете.`).join('\n\n')
+  const chunks = splitTelegramMessage(long)
+  check('длинный текст → несколько кусков', chunks.length >= 2)
+  check('каждый кусок не длиннее 4000 символов', chunks.every((c) => c.length <= 4000))
+  check('содержание не потерялось',
+    chunks.join(' ').replace(/\s+/g, ' ').trim() === long.replace(/\s+/g, ' ').trim())
+  check('резы по абзацам: куски заканчиваются на «.»', chunks.slice(0, -1).every((c) => c.endsWith('.')))
+  const huge = 'слово'.repeat(2000) // 10000 символов без единого пробела
+  const hchunks = splitTelegramMessage(huge)
+  check('текст без переносов → жёсткий разрез', hchunks.length >= 2 && hchunks.every((c) => c.length <= 4000))
+  check('ровно 4000 символов → один кусок', splitTelegramMessage('а'.repeat(4000)).length === 1)
+  check('4001 символ → два куска', splitTelegramMessage('а'.repeat(4001)).length === 2)
 }
 
 console.log('── Быстрое время на голое «Время» ──')

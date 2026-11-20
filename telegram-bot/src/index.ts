@@ -26,6 +26,7 @@ import {
   buildSearchQuery,
   fixFalseGoogled,
   withCityContext,
+  splitTelegramMessage,
 } from './brain.js'
 
 export interface Env {
@@ -45,7 +46,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.20 (brain v3.3)'
+const VERSION = 'v0.3.21 (brain v3.3)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -92,13 +93,21 @@ async function getBotId(token: string): Promise<number | null> {
 }
 
 async function sendMessage(token: string, chatId: number, text: string, replyTo?: number) {
-  const payload: Record<string, unknown> = {
-    chat_id: chatId,
-    text,
-    disable_web_page_preview: false,
+  // v0.3.21: Telegram берёт максимум 4096 символов на сообщение и отклоняет
+  // длинный текст ЦЕЛИКОМ — режем на части и отправляем по порядку
+  const chunks = splitTelegramMessage(text)
+  if (!chunks.length) return null
+  let last: unknown = null
+  for (let i = 0; i < chunks.length; i++) {
+    const payload: Record<string, unknown> = {
+      chat_id: chatId,
+      text: chunks[i],
+      disable_web_page_preview: false,
+    }
+    if (replyTo && i === 0) payload.reply_to_message_id = replyTo
+    last = await tgCall(token, 'sendMessage', payload)
   }
-  if (replyTo) payload.reply_to_message_id = replyTo
-  return tgCall(token, 'sendMessage', payload)
+  return last
 }
 
 // ── Обработка апдейта ────────────────────────────────────────────────────
