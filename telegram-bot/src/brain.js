@@ -1032,24 +1032,66 @@ export async function workersAiImage(prompt, opts = {}) {
   }
 }
 
-/** Рисование по цепочке художников. Успех: { image: {b64, mime, model}, tried, lastError },
- *  неудача: { error, tried, lastError } — tried/lastError есть всегда (диагностика
- *  в /image-test). Общий бюджет ~45 с: рисование идёт в фоне (waitUntil после
- *  ответа Telegram), спешка не критична. */
+/** Переводит промпт рисования на английский (v0.3.39): flux/Pollinations
+ *  следуют английским деталям лучше. Перевод — Workers AI llama-3.3-70b (тот же
+ *  биндинг, что и flux: отвечает за ~0.5с, ключей не надо). Уже английский →
+ *  как есть; перевод не удался → исходный промпт (рисуем и по-русски, просто
+ *  следование деталям слабее). */
+const TRANSLATE_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+const TRANSLATE_SYSTEM = 'You translate image-generation prompts into English. Reply with ONLY the translated prompt: a single line, no quotes, no explanations, no markdown. Keep art style words (digital painting, photo, anime, watercolor) as-is.'
+
+export async function translateImagePrompt(prompt, opts = {}) {
+  const text = String(prompt || '').trim()
+  if (!text) return { en: '', translated: false }
+  if (!/[а-яё]/i.test(text)) return { en: text, translated: false }
+  const ai = opts.aiBinding
+  if (!ai?.run) return { en: text, translated: false, translateError: 'нет биндинга AI' }
+  try {
+    const r = await Promise.race([
+      ai.run(TRANSLATE_MODEL, {
+        messages: [
+          { role: 'system', content: TRANSLATE_SYSTEM },
+          { role: 'user', content: text.slice(0, 900) },
+        ],
+        max_tokens: 220,
+      }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('перевод >8с')), 8000)),
+    ])
+    const raw = typeof r === 'string' ? r : String(r?.response || '')
+    let en = raw.split('\n').map((s) => s.trim()).filter(Boolean)[0] || ''
+    en = en.replace(/^["'`*]+|["'`*]+$/g, '').slice(0, 600)
+    // латиницы нет — модель не перевела (или промолчала) → рисуем исходный промпт
+    if (!en || !/[a-z]/i.test(en)) return { en: text, translated: false, translateError: 'модель не перевела' }
+    return { en, translated: true }
+  } catch (e) {
+    return { en: text, translated: false, translateError: String(e?.message || e).slice(0, 120) }
+  }
+}
+
+/** Рисование по цепочке художников. Промпт перед рисованием переводится на
+ *  английский (translateImagePrompt — фолбэк на исходный при сбое).
+ *  Успех: { image: {b64, mime, model}, en, translated, tried, lastError },
+ *  неудача: { error, en, translated, tried, lastError } — tried/lastError есть
+ *  всегда (диагностика в /image-test). Общий бюджет ~50 с: рисование идёт
+ *  в фоне (waitUntil после ответа Telegram), спешка не критична. */
 export async function generateImage(prompt, opts = {}) {
   const tried = []
   let lastError = ''
-  const g = await geminiImage(prompt, opts)
-  if (g.image) return { image: g.image, tried: g.tried || [], lastError: g.lastError || '' }
+  const tr = await translateImagePrompt(prompt, opts)
+  const en = tr.en || String(prompt || '')
+  // поля en/translated/translateError — литералами в каждом return: spread
+  // переменной мешает TS сливать ветки в один тип с опциональными полями
+  const g = await geminiImage(en, opts)
+  if (g.image) return { image: g.image, en: tr.en, translated: !!tr.translated, translateError: tr.translateError, tried: g.tried || [], lastError: g.lastError || '' }
   tried.push(...(g.tried || []))
   lastError = g.lastError || ''
-  const p = await pollinationsImage(prompt, opts)
-  if (p.image) return { image: p.image, tried, lastError }
+  const p = await pollinationsImage(en, opts)
+  if (p.image) return { image: p.image, en: tr.en, translated: !!tr.translated, translateError: tr.translateError, tried, lastError }
   tried.push(...(p.tried || []))
-  const f = await workersAiImage(prompt, opts)
-  if (f.image) return { image: f.image, tried, lastError }
+  const f = await workersAiImage(en, opts)
+  if (f.image) return { image: f.image, en: tr.en, translated: !!tr.translated, translateError: tr.translateError, tried, lastError }
   tried.push(`flux-1-schnell: ${f.error || 'неизвестная ошибка'}`)
-  return { error: 'все художники недоступны', tried, lastError: lastError || f.error || '' }
+  return { error: 'все художники недоступны', en: tr.en, translated: !!tr.translated, translateError: tr.translateError, tried, lastError: lastError || f.error || '' }
 }
 
 // ── Расшифровка голосовых (v0.3.25): аудио → текст ────────────────────────

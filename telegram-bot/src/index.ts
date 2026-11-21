@@ -62,7 +62,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.38 (brain v3.8)'
+const VERSION = 'v0.3.39 (brain v3.9)'
 // Зеркальный режим «голос на голос» (v0.3.37): включён — русский голос берём
 // из веб-версии (POST /api/tts → msedge-tts ru-RU-SvetlanaNeural, тот же тембр,
 // что в вебе; бесплатно и без ключей). aura-1 (Workers AI) для русского
@@ -719,9 +719,9 @@ async function handleImageTest(url: URL, env: Env): Promise<Response> {
     geminiBaseUrl: env.GEMINI_BASE_URL || '',
     aiBinding: env.AI,
   })
-  if (!r.image) return json({ ok: false, error: r.error, tried: r.tried, lastError: r.lastError || '', ms: Date.now() - t0 }, 500)
+  if (!r.image) return json({ ok: false, error: r.error, en: r.en || prompt, translated: !!r.translated, translateError: r.translateError || '', tried: r.tried, lastError: r.lastError || '', ms: Date.now() - t0 }, 500)
   const bytes = Uint8Array.from(atob(r.image.b64), (c) => c.charCodeAt(0))
-  const info = { ok: true, model: r.image.model, mime: r.image.mime, bytes: bytes.length, ms: Date.now() - t0 }
+  const info = { ok: true, model: r.image.model, mime: r.image.mime, bytes: bytes.length, en: r.en || prompt, translated: !!r.translated, ms: Date.now() - t0 }
   if (url.searchParams.get('raw') === '1') {
     return new Response(bytes, { headers: { 'content-type': r.image.mime, 'x-image-model': r.image.model } })
   }

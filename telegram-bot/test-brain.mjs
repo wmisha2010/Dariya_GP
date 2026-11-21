@@ -36,6 +36,7 @@ import {
   speakTextWeb,
   generateImage,
   workersAiImage,
+  translateImagePrompt,
   extractPageText,
   readPage,
   readPagesContext,
@@ -1374,6 +1375,45 @@ console.log('── generateImage: художники без ключей ──
     // tried-элементы дополнены суффиксами («HTTP 400», «mime ... — мимо») — сравниваем как подстроку
     check('все художники молчат → честная ошибка', !!r4.error && r4.error.includes('все художники') && r4.tried.some((t) => t.includes('pollinations/turbo')) && r4.tried.some((t) => t.includes('flux-1-schnell')))
     check('flux без биндинга → честная ошибка', (await workersAiImage('кот', {})).error === 'нет биндинга AI')
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+    resetCoarenaBreaker()
+  }
+}
+
+console.log('── translateImagePrompt: промпт на английский перед рисованием ──')
+{
+  // ru → en: первая строка, кавычки-обёртки сняты
+  const aiOk = { run: async () => ({ response: '"A ginger cat in glasses"\nВот перевод.' }) }
+  const r1 = await translateImagePrompt('рыжий кот в очках', { aiBinding: aiOk })
+  check('ru → en: первая строка, кавычки сняты', r1.translated === true && r1.en === 'A ginger cat in glasses')
+  // уже английский → passthrough, биндинг не зовём
+  const aiShout = { run: async () => { throw new Error('не должен зваться') } }
+  const r2 = await translateImagePrompt('a red cat, digital painting', { aiBinding: aiShout })
+  check('уже английский → как есть, без перевода', r2.translated === false && r2.en === 'a red cat, digital painting')
+  // модель ответила по-русски → фолбэк на исходный промпт
+  const aiRu = { run: async () => ({ response: 'рыжий кот в очках' }) }
+  const r3 = await translateImagePrompt('рыжий кот в очках', { aiBinding: aiRu })
+  check('модель не перевела → исходный промпт + причина', r3.translated === false && r3.en.includes('рыжий кот') && String(r3.translateError).includes('не перевела'))
+  // биндинг заболел → фолбэк на исходный
+  const aiDead = { run: async () => { throw new Error('binding sick') } }
+  const r4 = await translateImagePrompt('кот', { aiBinding: aiDead })
+  check('биндинг заболел → рисуем исходный промпт', r4.translated === false && r4.en === 'кот' && r4.translateError.includes('binding sick'))
+  // сквозной: перевод реально кормит художников (flux получает en-промпт)
+  const realErr = console.error
+  const realFetch = globalThis.fetch
+  console.error = () => {}
+  try {
+    let fluxPrompt = ''
+    const aiBoth = { run: async (model, args) => {
+      if (args?.messages) return { response: 'A cat in a beret' }
+      fluxPrompt = args?.prompt || ''
+      return { image: 'Zmx1eA' + 'A'.repeat(2200) }
+    } }
+    globalThis.fetch = async () => ({ ok: false, status: 400, text: async () => '', arrayBuffer: async () => new ArrayBuffer(0) })
+    const r5 = await generateImage('кот в берете', { geminiKey: 'x', aiBinding: aiBoth })
+    check('generateImage: перевод → flux получил en-промпт', !!r5.image && r5.image.model === 'flux-1-schnell' && r5.translated === true && r5.en === 'A cat in a beret' && fluxPrompt === 'A cat in a beret')
   } finally {
     globalThis.fetch = realFetch
     console.error = realErr
