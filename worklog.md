@@ -1340,3 +1340,13 @@ HTML страниц — свежий (вместе с выключателем) 
   прогона /ai-test?probe=whisperArray по 45с — очередь не отвечает вовсе.
 - /ai-test: проба whisperTurbo (b64 + language ru) вместо whisperArray/TopString.
 - Тест r1: turbo, b64 уходит как есть, language === 'ru'. VERSION v0.3.33.
+
+- ИТОГ (a1009f2 в проде, v0.3.33): /ai-test?probe=whisperTurbo — ok:true, 1421мс,
+  «Принет, Мария. Какая завтра погода?» (espeak-сэмпл «Привет, Дария, какая завтра
+  погода» — ошибки мелкие, синтетика; на живом голосе лучше). /voice-test полная
+  цепочка — ok:true, model workers-ai whisper-large-v3-turbo, 1238мс, шаг 0 = голос
+  → текст → команда → ответ. ГОЛОСОВЫЕ РАСШИФРОВЫВАЮТСЯ БЕЗ Всяких ключей: биндинг
+  [ai] деплоится с воркером, whisper-turbo ~$0.00051/мин аудио (free-лимит нейронов),
+  zero data retention. Цепочка: whisper-turbo → Gemini (когда дадут классический
+  ключ) → Coarena → OpenRouter. Осталось владельцу: просто отправить голосовое в
+  Telegram и убедиться на живом голосе.
