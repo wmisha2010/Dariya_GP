@@ -1366,3 +1366,28 @@ HTML страниц — свежий (вместе с выключателем) 
 - Рисование: action.current = 'upload_photo' → «отправляет фото» вместо «печатает».
 - Тесты 221 (индикатор — пламбинг index.ts, в юнит-тесты не лезет), tsc чисто,
   check:bundle 131.45 KiB. VERSION v0.3.34.
+
+## v0.3.35 (2026-11-21) — голосовые ОТВЕТЫ бота: TTS aura-1 через биндинг
+- Владелец: «голосовые ответы? интересно, можно попробовать». Каталог Workers AI:
+  4 TTS-модели — aura-1, aura-2-en (англ), aura-2-es (исп), melotts. melotts
+  помечена Deprecated 20.11.2026 (вчера) и русский не подтверждён — мимо (по опыту
+  этой недели депрекейтнутые модели ломаются: llama 5028, whisper висит в очереди).
+  Выбран @cf/deepgram/aura-1: вход {text, speaker (12 голосов), encoding, container},
+  выход — аудио-поток; opus+container ogg — РОВНО формат Telegram-голосовых.
+  Русский карточкой не заявлен → проверка эмпирически (round-trip зонд).
+- brain.js NEW speakText(text, opts): ai.run('@cf/deepgram/aura-1', {text, speaker:
+  'luna', encoding:'opus', container:'ogg'}) в гонке с таймером 20с (биндинг не
+  принимает AbortSignal — урок v0.3.32). Выход: ReadableStream|ArrayBuffer|Uint8Array
+  → b64 (спред ≤0x8000). Длинные ответы режем по последнему законченному предложению
+  (~1200 симв ≈ 1.5 мин речи). {audioB64, mime:'audio/ogg'} | {error}.
+- index.ts: sendVoice (multipart ogg, как sendPhoto v0.3.22); зеркальный режим
+  maybeVoiceReply: голосовое вошло → aura-1 озвучивает reply → sendVoice; синтез
+  упал → честный откат на текст (ответ НЕ теряется никогда). Статус в ТГ при
+  синтезе: record_voice («записывает голосовое»). Голосом отвечаются и «погода»,
+  и финальный LLM-ответ. NEW /tts-test: aura-1 говорит фразу → whisper-turbo
+  расшифровывает ОБРАТНО (round-trip самопроверка «говорит ли по-русски» без ушей);
+  ?phrase= / ?speaker= / ?out=audio (бинарём, диагностика в заголовках).
+- Тесты 221→227 (+6: поток→audioB64→байты те же, буфер+speaker, пустой текст,
+  без биндинга, таймаут гонки). Урок среды: после переработки песочницы
+  node_modules частично потерялся (tsc: TS2688 @cloudflare/workers-types) —
+  npm install вернул. VERSION v0.3.35, бандл 135.97 KiB.

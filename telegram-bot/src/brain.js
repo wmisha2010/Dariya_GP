@@ -983,6 +983,38 @@ function audioFormat(mime) {
   return 'ogg'
 }
 
+/** Голосовые ответы (v0.3.35): TTS через биндинг env.AI — @cf/deepgram/aura-1.
+ *  Вход { text, speaker, encoding, container }; opus+ogg — ровно то, что Telegram
+ *  ждёт от голосовых сообщений. Выход биндинга — ReadableStream (или буфер).
+ *  Биндинг не принимает AbortSignal → гонка с таймером: заядрененная очередь не
+ *  должна вешать ответ бота. Возвращает { audioB64, mime } или { error }. */
+export async function speakText(text, opts = {}) {
+  const ai = opts.aiBinding
+  if (!ai?.run) return { error: 'нет биндинга AI' }
+  const clean = String(text || '').trim()
+  if (!clean) return { error: 'пустой текст' }
+  // длинный ответ режем по последнему законченному предложению (~1.5 мин речи)
+  const cut = clean.slice(0, 1200)
+  const stop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '))
+  const said = stop > 300 ? cut.slice(0, stop + 1) : cut
+  const speaker = opts.ttsSpeaker || 'luna'
+  const ttsTimeoutMs = opts.ttsTimeoutMs || 20000
+  try {
+    const out = await Promise.race([
+      ai.run('@cf/deepgram/aura-1', { text: said, speaker, encoding: 'opus', container: 'ogg' }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error(`таймаут TTS (>${ttsTimeoutMs}мс)`)), ttsTimeoutMs)),
+    ])
+    const buf = out instanceof Uint8Array ? out
+      : out instanceof ArrayBuffer ? new Uint8Array(out)
+      : new Uint8Array(await new Response(out).arrayBuffer())
+    let bin = ''
+    for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000))
+    return { audioB64: btoa(bin), mime: 'audio/ogg' }
+  } catch (e) {
+    return { error: 'tts: ' + String(e?.message || e).slice(0, 160) }
+  }
+}
+
 /** Расшифровывает аудио (base64). Успех: { text, model }, неудача: { error, tried, lastError }.
  *  Бюджет ~25 с — уложиться в фон Telegram. */
 export async function transcribeAudio(b64, mime = 'audio/ogg', opts = {}) {

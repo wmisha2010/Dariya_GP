@@ -32,6 +32,7 @@ import {
   withImageParts,
   VISION_OPENROUTER,
   transcribeAudio,
+  speakText,
   extractPageText,
   readPage,
   readPagesContext,
@@ -1257,6 +1258,37 @@ console.log('── Голосовые: Workers AI whisper (биндинг env.A
     check('whisper висит → таймаут гонки → цепочка дальше', r4.text === 'Запаска услышала')
   } finally {
     globalThis.fetch = realFetch
+    console.error = realErr
+    resetCoarenaBreaker()
+  }
+}
+
+console.log('── Голосовые ответы: speakText (TTS aura-1 через биндинг) ──')
+{
+  const realErr = console.error
+  console.error = () => {}
+  try {
+    const bytes = new Uint8Array([79, 103, 103, 83, 0, 2, 1, 2, 3])
+    const runs = []
+    const aiStream = new ReadableStream({ start(c) { c.enqueue(bytes); c.close() } })
+    const aiOk = { run: async (model, input) => { runs.push({ model, input }); return aiStream } }
+    const r1 = await speakText('Привет! Я Дария, отвечаю голосом.', { aiBinding: aiOk })
+    check('aura-1: {text, speaker, opus+ogg} ушло, поток собран в audioB64',
+      !r1.error && r1.mime === 'audio/ogg'
+      && runs.length === 1 && runs[0].model === '@cf/deepgram/aura-1'
+      && runs[0].input.encoding === 'opus' && runs[0].input.container === 'ogg'
+      && runs[0].input.speaker === 'luna' && runs[0].input.text.includes('Дария'))
+    const back = Uint8Array.from(atob(r1.audioB64), (c) => c.charCodeAt(0))
+    check('audioB64 декодируется в те же байты', back.length === bytes.length && back.every((b, i) => b === bytes[i]))
+    // буфер вместо потока тоже работает, speaker переопределяется
+    const r2 = await speakText('Тест', { aiBinding: { run: async () => bytes }, ttsSpeaker: 'zeus' })
+    check('Uint8Array от биндинга принимается, speaker переопределяется', !r2.error && !!r2.audioB64 && runs.length === 1)
+    check('пустой текст → ошибка', (await speakText('   ', { aiBinding: aiOk })).error === 'пустой текст')
+    check('без биндинга → ошибка', (await speakText('привет', {})).error === 'нет биндинга AI')
+    // заядрененный TTS → таймаут гонки, честная ошибка
+    const r3 = await speakText('долго', { aiBinding: { run: () => new Promise(() => {}) }, ttsTimeoutMs: 50 })
+    check('TTS висит → таймаут гонки', !!r3.error && r3.error.includes('таймаут'))
+  } finally {
     console.error = realErr
     resetCoarenaBreaker()
   }

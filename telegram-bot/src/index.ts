@@ -31,6 +31,7 @@ import {
   extractImageIntent,
   geminiImage,
   transcribeAudio,
+  speakText,
   readPagesContext,
   readPage,
 } from './brain.js'
@@ -60,7 +61,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.34 (brain v3.7)'
+const VERSION = 'v0.3.35 (brain v3.7)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -186,6 +187,17 @@ async function sendPhoto(token: string, chatId: number, b64: string, mime: strin
   return fetch(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', body: form })
 }
 
+/** Голосовое в Telegram (v0.3.35): sendVoice хочет OGG/Opus — aura-1 отдаёт ровно
+ *  его; multipart-загрузка как у sendPhoto (v0.3.22). */
+async function sendVoice(token: string, chatId: number, b64: string, replyTo?: number) {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+  const form = new FormData()
+  form.append('chat_id', String(chatId))
+  if (replyTo) form.append('reply_to_message_id', String(replyTo))
+  form.append('voice', new Blob([bytes], { type: 'audio/ogg' }), 'daria.ogg')
+  return fetch(`https://api.telegram.org/bot${token}/sendVoice`, { method: 'POST', body: form })
+}
+
 /** Файл Telegram (фото/голос) → {b64, mime}: getFile даёт file_path, файл
  *  качаем с file-сервера и кодируем по частям (спред ≤0x8000 не рвёт стек). */
 async function tgFileB64(token: string, fileId: string, mime: string): Promise<{ b64: string; mime: string } | null> {
@@ -260,6 +272,20 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   const sendMessageStopped: typeof sendMessage = async (t, c, body, replyTo) => { stopTyping(); return sendMessage(t, c, body, replyTo) }
   const sendPhotoStopped: typeof sendPhoto = async (t, c, b64, mime, cap, replyTo) => { stopTyping(); return sendPhoto(t, c, b64, mime, cap, replyTo) }
 
+  // Зеркальный режим (v0.3.35): голосовое → голосовой ответ (aura-1 через биндинг
+  // env.AI), честный откат на текст, если синтез не удался. Голос вошёл — статус
+  // «записывает голосовое» вместо «печатает».
+  const wantsVoice = isVoice
+  const maybeVoiceReply = async (reply: string): Promise<boolean> => {
+    if (!wantsVoice) return false
+    action.current = 'record_voice'
+    const t = await speakText(reply, { aiBinding: env.AI })
+    if (!t.audioB64) return false
+    stopTyping()
+    await sendVoice(token, chatId, t.audioB64, isPrivate ? undefined : msg.message_id)
+    return true
+  }
+
   // Голое фото без подписи — дефолтный вопрос
   if (isPhoto && !command) command = 'Что на этом фото? Опиши подробно и живо.'
 
@@ -293,7 +319,8 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   // 1) Быстрые ответы без ИИ
   const quick = resolveCommand(command, { tz, webAppUrl })
   if (quick.handled) {
-    await sendMessageStopped(token, chatId, quick.text, isPrivate ? undefined : msg.message_id)
+    // «погода» голосом → голосом; синтез упал → обычный текст
+    if (!(await maybeVoiceReply(quick.text))) await sendMessageStopped(token, chatId, quick.text, isPrivate ? undefined : msg.message_id)
     return
   }
 
@@ -382,7 +409,8 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
     reply = NO_BRAIN[Math.floor(Math.random() * NO_BRAIN.length)]
   }
 
-  await sendMessageStopped(token, chatId, reply, isPrivate ? undefined : msg.message_id)
+  // голосовое вошло — голосовое выйдет; TTS не удался → обычный текст
+  if (!(await maybeVoiceReply(reply))) await sendMessageStopped(token, chatId, reply, isPrivate ? undefined : msg.message_id)
 }
 
 // ── HTTP-маршруты ────────────────────────────────────────────────────────
@@ -545,6 +573,51 @@ async function handleAiTest(url: URL, env: Env): Promise<Response> {
     return { text: String(r?.text || '').slice(0, 120) }
   })
   return json(out)
+}
+
+/** Диагностика TTS (v0.3.35): aura-1 озвучивает фразу → whisper-turbo расшифровывает
+ *  обратно (round-trip: видно, говорит ли она по-русски, «на слух» без ушей).
+ *  ?phrase= — своя фраза (до 200 симв.), ?speaker= — голос (по умолч. luna),
+ *  ?out=audio — отдать само аудио бинарём ( ogg/opus ). */
+async function handleTtsTest(url: URL, env: Env): Promise<Response> {
+  const json = (obj: any, status = 200) =>
+    new Response(JSON.stringify(obj, null, 2), {
+      status,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    })
+  const key = env.SEARCH_TEST_KEY || ''
+  if (key && url.searchParams.get('key') !== key) return json({ ok: false, error: 'неверный key' }, 403)
+  const ai = env.AI
+  if (!ai?.run) return json({ ok: false, error: 'биндинг AI отсутствует (env.AI undefined)' })
+  const phrase = (url.searchParams.get('phrase') || 'Привет! Я Дария, и я научилась отвечать голосом.').slice(0, 200)
+  const speaker = url.searchParams.get('speaker') || 'luna'
+  const s = Date.now()
+  const t = await speakText(phrase, { aiBinding: ai, ttsSpeaker: speaker })
+  const ms = Date.now() - s
+  if (t.error || !t.audioB64) return json({ ok: false, ms, phrase, speaker, error: t.error })
+  let heard = ''
+  try {
+    const w: any = await Promise.race([
+      ai.run('@cf/openai/whisper-large-v3-turbo', { audio: t.audioB64, language: 'ru', task: 'transcribe' }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('whisper >30с')), 30000)),
+    ])
+    heard = String(w?.text || '').trim()
+  } catch (e: any) {
+    heard = 'whisper не смог: ' + String(e?.message || e).slice(0, 100)
+  }
+  const bytes = Uint8Array.from(atob(t.audioB64), (c) => c.charCodeAt(0))
+  if (url.searchParams.get('out') === 'audio') {
+    return new Response(bytes, {
+      status: 200,
+      headers: {
+        'content-type': 'audio/ogg',
+        'x-tts-ms': String(ms),
+        'x-tts-bytes': String(bytes.length),
+        'x-tts-heard': encodeURIComponent(heard),
+      },
+    })
+  }
+  return json({ ok: true, ms, phrase, speaker, bytes: bytes.length, mime: t.mime, heard })
 }
 
 /** Диагностика «мозга»: откуда воркер ходит в сеть, жив ли ключ Gemini, тестовый ответ */
@@ -944,6 +1017,7 @@ export default {
     if (url.pathname === '/gemini-key-test' && request.method === 'GET') return handleGeminiKeyTest(url, env)
     if (url.pathname === '/read-test' && request.method === 'GET') return handleReadTest(url, env)
     if (url.pathname === '/ai-test' && request.method === 'GET') return handleAiTest(url, env)
+    if (url.pathname === '/tts-test' && request.method === 'GET') return handleTtsTest(url, env)
     if (url.pathname === '/telegram-webhook' && request.method === 'POST') return handleWebhook(request, env, ctx)
     return new Response('not found', { status: 404 })
   },
