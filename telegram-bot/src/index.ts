@@ -60,7 +60,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.33 (brain v3.7)'
+const VERSION = 'v0.3.34 (brain v3.7)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -165,6 +165,16 @@ async function sendMessage(token: string, chatId: number, text: string, replyTo?
   return last
 }
 
+/** Индикатор «печатает…» (v0.3.34): Telegram показывает статус ~5с после каждого
+ *  sendChatAction — цикл шлёт его каждые 4.5с, пока бот думает (голос/поиск/LLM).
+ *  Ошибки игнорируем: индикатор не критичен для ответа. */
+async function chatActionLoop(token: string, chatId: number, action: { current: string }, isOn: () => boolean): Promise<void> {
+  while (isOn()) {
+    try { await tgCall(token, 'sendChatAction', { chat_id: chatId, action: action.current }) } catch { /* индикатор не критичен */ }
+    await new Promise((r) => setTimeout(r, 4500))
+  }
+}
+
 /** Картинка в Telegram: sendPhoto принимает multipart-загрузку, не URL/ID */
 async function sendPhoto(token: string, chatId: number, b64: string, mime: string, caption: string, replyTo?: number) {
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
@@ -239,6 +249,17 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
       return
     }
   }
+  // Индикатор «печатает…» (v0.3.34): горит с этого момента и до отправки ответа —
+  // расшифровка голоса, поиск, чтение страниц, размышления LLM. При рисовании
+  // переключается на «отправляет фото». Живёт в том же waitUntil, что и обработка.
+  const action = { current: 'typing' }
+  let typingOn = true
+  void chatActionLoop(token, chatId, action, () => typingOn)
+  // любая отправка ответа гасит индикатор — не надо помнить про каждый return
+  const stopTyping = () => { typingOn = false }
+  const sendMessageStopped: typeof sendMessage = async (t, c, body, replyTo) => { stopTyping(); return sendMessage(t, c, body, replyTo) }
+  const sendPhotoStopped: typeof sendPhoto = async (t, c, b64, mime, cap, replyTo) => { stopTyping(); return sendPhoto(t, c, b64, mime, cap, replyTo) }
+
   // Голое фото без подписи — дефолтный вопрос
   if (isPhoto && !command) command = 'Что на этом фото? Опиши подробно и живо.'
 
@@ -247,7 +268,7 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   if (isVoice) {
     const audio = await tgFileB64(token, msg.voice.file_id, msg.voice.mime_type || 'audio/ogg')
     if (!audio) {
-      await sendMessage(token, chatId, 'Не смогла скачать голосовое — Telegram не отдал файл 🙈 Попробуй ещё раз!', isPrivate ? undefined : msg.message_id)
+      await sendMessageStopped(token, chatId, 'Не смогла скачать голосовое — Telegram не отдал файл 🙈 Попробуй ещё раз!', isPrivate ? undefined : msg.message_id)
       return
     }
     const r = await transcribeAudio(audio.b64, audio.mime, {
@@ -259,7 +280,7 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
       geminiModel: env.GEMINI_MODEL || '',
     })
     if (!r.text) {
-      await sendMessage(token, chatId, 'Не расслышала голосовое 😅 Сервис расшифровки не ответил. Попробуй ещё раз — или напиши текстом!', isPrivate ? undefined : msg.message_id)
+      await sendMessageStopped(token, chatId, 'Не расслышала голосовое 😅 Сервис расшифровки не ответил. Попробуй ещё раз — или напиши текстом!', isPrivate ? undefined : msg.message_id)
       return
     }
     // расшифровка — главное содержание; подпись (если была) идёт дополнением
@@ -272,7 +293,7 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   // 1) Быстрые ответы без ИИ
   const quick = resolveCommand(command, { tz, webAppUrl })
   if (quick.handled) {
-    await sendMessage(token, chatId, quick.text, isPrivate ? undefined : msg.message_id)
+    await sendMessageStopped(token, chatId, quick.text, isPrivate ? undefined : msg.message_id)
     return
   }
 
@@ -283,19 +304,20 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   // Для ФОТО интент не проверяем: пришла картинка — её смотрим, а не рисуем.
   const imagePrompt = isPhoto ? null : extractImageIntent(command)
   if (imagePrompt) {
+    action.current = 'upload_photo' // статус «отправляет фото» вместо «печатает»
     const r = await geminiImage(imagePrompt, {
       geminiKey: env.GEMINI_API_KEY || '',
       geminiBaseUrl: env.GEMINI_BASE_URL || '',
     })
     if (r.image) {
-      await sendPhoto(token, chatId, r.image.b64, r.image.mime, `🎨 ${imagePrompt}`, isPrivate ? undefined : msg.message_id)
+      await sendPhotoStopped(token, chatId, r.image.b64, r.image.mime, `🎨 ${imagePrompt}`, isPrivate ? undefined : msg.message_id)
       history.push({ role: 'user', content: text }, { role: 'assistant', content: `[нарисовала картинку: ${imagePrompt}]` })
       if (history.length > HISTORY_MAX_TURNS * 2) history.splice(0, history.length - HISTORY_MAX_TURNS * 2)
       chatHistory.set(chatId, history)
       return
     }
     // рисовалка недоступна — честно, без ложных обещаний
-    await sendMessage(token, chatId, NO_PAINT[Math.floor(Math.random() * NO_PAINT.length)], isPrivate ? undefined : msg.message_id)
+    await sendMessageStopped(token, chatId, NO_PAINT[Math.floor(Math.random() * NO_PAINT.length)], isPrivate ? undefined : msg.message_id)
     return
   }
 
@@ -305,7 +327,7 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   if (isPhoto) {
     photo = await photoToB64(token, msg.photo)
     if (!photo && !text) {
-      await sendMessage(token, chatId, 'Не смогла открыть картинку — Telegram не отдал файл 🙈 Попробуй ещё раз!', isPrivate ? undefined : msg.message_id)
+      await sendMessageStopped(token, chatId, 'Не смогла открыть картинку — Telegram не отдал файл 🙈 Попробуй ещё раз!', isPrivate ? undefined : msg.message_id)
       return
     }
   }
@@ -360,7 +382,7 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
     reply = NO_BRAIN[Math.floor(Math.random() * NO_BRAIN.length)]
   }
 
-  await sendMessage(token, chatId, reply, isPrivate ? undefined : msg.message_id)
+  await sendMessageStopped(token, chatId, reply, isPrivate ? undefined : msg.message_id)
 }
 
 // ── HTTP-маршруты ────────────────────────────────────────────────────────
