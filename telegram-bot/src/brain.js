@@ -535,16 +535,30 @@ export function cityCandidates(raw) {
   const list = [c]
   if (last === 'е') list.push(stem, stem + 'а', stem + 'о', stem + 'ь', stem + 'й')
   else if (last === 'и') list.push(stem + 'я', stem + 'ь', stem + 'й', stem)
-  else if (last === 'у') list.push(stem + 'а', stem + 'ый', stem + 'ая')
+  else if (last === 'у') list.push(stem, stem + 'а', stem + 'ый', stem + 'ая')
   else if (last === 'ю') list.push(stem + 'я', stem + 'а')
   else if (last === 'а') list.push(stem + 'о')
   else if (last === 'ы') list.push(stem + 'а', stem + 'ый')
   return [...new Set(list)].slice(0, 6)
 }
 
+/** Крупные регионы, которых в геокодере НЕТ (он знает только населённые пункты):
+ *  на «Крым» он отвечает деревней «Крым» (4475 чел.) и городом «Крымск», а
+ *  «Крыму» не находит ничего (прод 2026-11-21: «погода в Крыму» падала в гонку
+ *  движков и отвечала Википедией про фильм 1989 года). Координаты — центр
+ *  региона (для Крыма — Симферополь); карта пополняется по мере жалоб. */
+const REGION_PLACES = {
+  'крым': { name: 'Крым', latitude: 44.9521, longitude: 34.1021, admin1: '' },
+}
+
 /** Геокодер open-meteo: перебираем формы города, выбираем самое населённое совпадение */
 async function geocodeCity(raw) {
   const all = []
+  // Сначала регионы мимо геокодера: «Крыму» → кандидат «Крым» из карты
+  for (const f of cityCandidates(raw).slice(0, 3)) {
+    const r = REGION_PLACES[String(f).toLowerCase()]
+    if (r) return r
+  }
   // Не более 3 форм города и по 4 с на запрос: иначе редкий город держит
   // обработку слишком долго (в Telegram фон живёт ~30 с после ответа)
   for (const name of cityCandidates(raw).slice(0, 3)) {

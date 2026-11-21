@@ -27,6 +27,7 @@ import {
   stripToolCallMarkup,
   withCityContext,
   timeLookup,
+  weatherLookup,
   resetGeminiBreaker,
   resetCoarenaBreaker,
   withImageParts,
@@ -1472,6 +1473,29 @@ console.log('── Новости v0.3.40: описания в сниппете
   } finally {
     globalThis.fetch = realFetch
     resetCoarenaBreaker()
+  }
+}
+
+console.log('── Погода v0.3.41: регион «Крым» мимо геокодера ──')
+{
+  check('cityCandidates: «Крыму» даёт именительную «Крым»', cityCandidates('Крыму').includes('Крым'))
+  const realFetch = globalThis.fetch
+  try {
+    globalThis.fetch = async (url) => {
+      const u = String(url)
+      if (/api\.open-meteo\.com\/v1\/forecast/.test(u)) {
+        return new Response(JSON.stringify({
+          current: { temperature_2m: 12, apparent_temperature: 10, relative_humidity_2m: 60, wind_speed_10m: 4, weather_code: 1 },
+          daily: { time: ['2026-11-21', '2026-11-22'], temperature_2m_max: [13, 14], temperature_2m_min: [7, 8] },
+        }))
+      }
+      throw new Error('геокодер не должен зваться для региона: ' + u)
+    }
+    const w = await weatherLookup('погода в Крыму')
+    check('погода: «в Крыму» → регион Крым, не Крымск и не вики',
+      w.engine === 'open-meteo' && w.title.includes('Погода: Крым') && !w.title.includes('Крымск'))
+  } finally {
+    globalThis.fetch = realFetch
   }
 }
 
