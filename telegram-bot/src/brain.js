@@ -970,6 +970,87 @@ export async function geminiImage(prompt, opts = {}) {
   return { error: 'все image-модели недоступны', tried, lastError }
 }
 
+// ── Художники без ключей (v0.3.38) ────────────────────────────────────────
+// Ключ Gemini протух (2026-11-21: все модели дают «API key not valid», пробы
+// /gemini-key-test и /image-test), а рисовать хочется. Цепочка-обёртка
+// generateImage: Gemini (если ключ оживёт — качество топ) → Pollinations
+// (без ключей вообще, русский промпт) → flux-1-schnell (биндинг Workers AI).
+
+/** Pollinations.ai — бесплатный генератор без ключей. Промпт можно по-русски
+ *  (бэкенд сам переводит), flux → turbo как запасной. Возвращает webp? —
+ *  пропускаем (Telegram sendPhoto хочет jpeg/png), идём к следующей модели. */
+const POLLINATIONS_MODELS = ['flux', 'turbo']
+
+export async function pollinationsImage(prompt, opts = {}) {
+  const deadline = Date.now() + (opts.paintTimeoutMs || 22000)
+  const tried = []
+  for (const model of POLLINATIONS_MODELS) {
+    if (Date.now() > deadline) break
+    tried.push(`pollinations/${model}`)
+    try {
+      const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(String(prompt || '').slice(0, 900))}` +
+        `?width=1024&height=1024&nologo=true&model=${model}&seed=${Math.floor(Math.random() * 1e9)}`
+      const res = await fetch(url, { signal: AbortSignal.timeout(20000) })
+      if (!res.ok) { tried[tried.length - 1] += ` HTTP ${res.status}`; continue }
+      const buf = new Uint8Array(await res.arrayBuffer())
+      const mime = String(res.headers.get('content-type') || '').split(';')[0]
+      if (buf.length < 2000 || !mime.startsWith('image/') || mime === 'image/webp') {
+        tried[tried.length - 1] += buf.length < 2000 ? ' пусто' : ` mime ${mime} — мимо`
+        continue
+      }
+      let bin = ''
+      for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000))
+      return { image: { b64: btoa(bin), mime, model: `pollinations-${model}` } }
+    } catch (e) {
+      tried[tried.length - 1] += ' таймаут'
+    }
+  }
+  return { error: 'pollinations недоступен', tried }
+}
+
+/** Workers AI flux-1-schnell — тот же биндинг воркера, что расшифровывает
+ *  голосовые (whisper). Ключей не надо; промпт понимает лучше по-английски,
+ *  поэтому стоит последним рубежом. Успех: { image: {b64:'image/png'} }. */
+export async function workersAiImage(prompt, opts = {}) {
+  const ai = opts.aiBinding
+  if (!ai) return { error: 'нет биндинга AI' }
+  try {
+    const r = await Promise.race([
+      ai.run('@cf/black-forest-labs/flux-1-schnell', {
+        prompt: String(prompt || '').slice(0, 900),
+        num_steps: 4,
+        max_sequence_length: 64,
+      }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('flux >20с')), 20000)),
+    ])
+    const b64 = typeof r === 'string' ? r : (r?.image || '')
+    if (!b64 || b64.length < 1000) return { error: 'flux: пустой ответ' }
+    return { image: { b64, mime: 'image/png', model: 'flux-1-schnell' } }
+  } catch (e) {
+    return { error: 'flux: ' + String(e?.message || e).slice(0, 160) }
+  }
+}
+
+/** Рисование по цепочке художников. Успех: { image: {b64, mime, model}, tried, lastError },
+ *  неудача: { error, tried, lastError } — tried/lastError есть всегда (диагностика
+ *  в /image-test). Общий бюджет ~45 с: рисование идёт в фоне (waitUntil после
+ *  ответа Telegram), спешка не критична. */
+export async function generateImage(prompt, opts = {}) {
+  const tried = []
+  let lastError = ''
+  const g = await geminiImage(prompt, opts)
+  if (g.image) return { image: g.image, tried: g.tried || [], lastError: g.lastError || '' }
+  tried.push(...(g.tried || []))
+  lastError = g.lastError || ''
+  const p = await pollinationsImage(prompt, opts)
+  if (p.image) return { image: p.image, tried, lastError }
+  tried.push(...(p.tried || []))
+  const f = await workersAiImage(prompt, opts)
+  if (f.image) return { image: f.image, tried, lastError }
+  tried.push('flux-1-schnell')
+  return { error: 'все художники недоступны', tried, lastError: lastError || f.error || '' }
+}
+
 // ── Расшифровка голосовых (v0.3.25): аудио → текст ────────────────────────
 // Telegram голосовые — OGG/Opus. Цепочка: Gemini native (inlineData, умеет
 // audio/ogg) → Coarena chat/completions с input_audio (OpenAI-формат, арена

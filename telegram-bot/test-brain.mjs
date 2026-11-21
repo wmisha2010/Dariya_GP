@@ -34,6 +34,8 @@ import {
   transcribeAudio,
   speakText,
   speakTextWeb,
+  generateImage,
+  workersAiImage,
   extractPageText,
   readPage,
   readPagesContext,
@@ -1324,6 +1326,54 @@ console.log('── speakTextWeb: русский голос через веб-в
     check('веб-TTS висит → таймаут гонки', !!w2.error && w2.error.includes('таймаут'))
     check('веб-TTS: пустой текст → ошибка', (await speakTextWeb('  ', { webAppUrl: 'https://web.example/' })).error === 'пустой текст')
     check('веб-TTS: нет адреса веба → ошибка', (await speakTextWeb('привет', {})).error.includes('WEB_APP_URL'))
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+    resetCoarenaBreaker()
+  }
+}
+
+console.log('── generateImage: художники без ключей ──')
+{
+  const realErr = console.error
+  const realFetch = globalThis.fetch
+  console.error = () => {}
+  try {
+    const png = new Uint8Array(2200)
+    png.set([137, 80, 78, 71, 13, 10, 26, 10], 0)
+    // Gemini «протух» (400 API key not valid) → pollinations рисует
+    globalThis.fetch = async (url) => {
+      const u = String(url)
+      if (u.includes('pollinations')) {
+        return { ok: true, status: 200, arrayBuffer: async () => png.buffer, headers: { get: (h) => (h === 'content-type' ? 'image/jpeg' : null) } }
+      }
+      return { ok: false, status: 400, text: async () => '{"error":{"message":"API key not valid"}}', arrayBuffer: async () => new ArrayBuffer(0) }
+    }
+    const r1 = await generateImage('кот в берете', { geminiKey: 'протухший' })
+    check('Gemini 400 → pollinations рисует (jpeg 1024px)', !!r1.image && r1.image.model === 'pollinations-flux' && r1.image.mime === 'image/jpeg' && String(r1.image.b64).length > 100)
+    // pollinations тоже умер → flux из биндинга спасает
+    globalThis.fetch = async (url) => (String(url).includes('pollinations')
+      ? { ok: false, status: 500, arrayBuffer: async () => new ArrayBuffer(0), headers: { get: () => null }, text: async () => '' }
+      : { ok: false, status: 400, text: async () => '', arrayBuffer: async () => new ArrayBuffer(0) })
+    const aiFlux = { run: async () => ({ image: 'Zmx1eA' + 'A'.repeat(2200) }) }
+    const r2 = await generateImage('кот', { geminiKey: 'x', aiBinding: aiFlux })
+    check('pollinations 500 → flux-1-schnell спасает', !!r2.image && r2.image.model === 'flux-1-schnell' && r2.image.mime === 'image/png')
+    // webp от pollinations — пропускаем обе модели и берём flux
+    let webpCalls = 0
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('pollinations')) {
+        webpCalls++
+        return { ok: true, status: 200, arrayBuffer: async () => png.buffer, headers: { get: (h) => (h === 'content-type' ? 'image/webp' : null) } }
+      }
+      return { ok: false, status: 400, text: async () => '', arrayBuffer: async () => new ArrayBuffer(0) }
+    }
+    const r3 = await generateImage('кот', { geminiKey: 'x', aiBinding: aiFlux })
+    check('pollinations вернул webp → пропустили и взяли flux', !!r3.image && r3.image.model === 'flux-1-schnell' && webpCalls === 2)
+    // ничего не работает → честная ошибка со списком попыток
+    const r4 = await generateImage('кот', { geminiKey: 'x' })
+    // tried-элементы дополнены суффиксами («HTTP 400», «mime ... — мимо») — сравниваем как подстроку
+    check('все художники молчат → честная ошибка', !!r4.error && r4.error.includes('все художники') && r4.tried.some((t) => t.includes('pollinations/turbo')) && r4.tried.some((t) => t.includes('flux-1-schnell')))
+    check('flux без биндинга → честная ошибка', (await workersAiImage('кот', {})).error === 'нет биндинга AI')
   } finally {
     globalThis.fetch = realFetch
     console.error = realErr

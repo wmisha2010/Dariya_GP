@@ -29,7 +29,7 @@ import {
   withCityContext,
   splitTelegramMessage,
   extractImageIntent,
-  geminiImage,
+  generateImage,
   transcribeAudio,
   speakText,
   speakTextWeb,
@@ -62,7 +62,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.37 (brain v3.7)'
+const VERSION = 'v0.3.38 (brain v3.8)'
 // Зеркальный режим «голос на голос» (v0.3.37): включён — русский голос берём
 // из веб-версии (POST /api/tts → msedge-tts ru-RU-SvetlanaNeural, тот же тембр,
 // что в вебе; бесплатно и без ключей). aura-1 (Workers AI) для русского
@@ -345,9 +345,10 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   const imagePrompt = isPhoto ? null : extractImageIntent(command)
   if (imagePrompt) {
     action.current = 'upload_photo' // статус «отправляет фото» вместо «печатает»
-    const r = await geminiImage(imagePrompt, {
+    const r = await generateImage(imagePrompt, {
       geminiKey: env.GEMINI_API_KEY || '',
       geminiBaseUrl: env.GEMINI_BASE_URL || '',
+      aiBinding: env.AI,
     })
     if (r.image) {
       await sendPhotoStopped(token, chatId, r.image.b64, r.image.mime, `🎨 ${imagePrompt}`, isPrivate ? undefined : msg.message_id)
@@ -713,9 +714,10 @@ async function handleImageTest(url: URL, env: Env): Promise<Response> {
   if (key && url.searchParams.get('key') !== key) return json({ ok: false, error: 'неверный key' }, 403)
   const prompt = (url.searchParams.get('q') || 'рыжий кот в художественном берете, цифровая живопись').trim()
   const t0 = Date.now()
-  const r = await geminiImage(prompt, {
+  const r = await generateImage(prompt, {
     geminiKey: env.GEMINI_API_KEY || '',
     geminiBaseUrl: env.GEMINI_BASE_URL || '',
+    aiBinding: env.AI,
   })
   if (!r.image) return json({ ok: false, error: r.error, tried: r.tried, lastError: r.lastError || '', ms: Date.now() - t0 }, 500)
   const bytes = Uint8Array.from(atob(r.image.b64), (c) => c.charCodeAt(0))

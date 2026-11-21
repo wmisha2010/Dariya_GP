@@ -1425,3 +1425,26 @@ HTML страниц — свежий (вместе с выключателем) 
   ворклог/пуш отдельной командой после зелёных гейтов.
 - Тесты 227→233 (+6: POST/voice/URL/said, байты туда-обратно, HTTP 500, таймаут,
   пустой текст, нет адреса). tsc чисто, бандл 141.14 KiB. VERSION v0.3.37.
+
+## v0.3.38 (2026-11-21) — рисование починено: художники без ключей
+- Владелец: «Про рисования Дария не может(». Диагноз /image-test + /gemini-key-test:
+  GEMINI_API_KEY протух — ВСЕ 5 image-моделей (3× Interactions + 2× legacy) дают
+  «API key not valid». Текстовый мост Gemini мёртв тем же ключом (текст выжил на
+  Coarena→OpenRouter, потому болт не сломался). Ключ может прислать только владелец
+  (Google-аккаунт) — но ждать нельзя.
+- Решение — цепочка художников (brain.js): Gemini (если ключ оживёт — качество топ,
+  падает за 250мс) → pollinationsImage (image.pollinations.ai, БЕЗ ключей, промпт
+  можно по-русски, flux→turbo, webp-ответы пропускаем — sendPhoto хочет jpeg/png)
+  → workersAiImage (@cf/black-forest-labs/flux-1-schnell через биндинг env.AI —
+  тот же, что расшифровывает голосовые; num_steps:4, промпт лучше по-английски).
+  generateImage всегда возвращает tried/lastError (нормализовано — tsc на
+  handleImageTest ловил недостающие поля на union).
+- Урок: Array.includes сравнивает элементы ЦЕЛИКОМ, не как подстроку — тест
+  «честная ошибка» падал на tried-элементах с суффиксами («HTTP 400», «mime…»).
+  Правильно: tried.some(t => t.includes(...)). Отладка через временный
+  console.log в тесте + отдельный scripts/debug-paint.mjs.
+- node_modules в песочнице почистили — tsc потерял @cloudflare/workers-types,
+  вылечено npm install в telegram-bot/.
+- Тесты 233→238 (+5: gemini 400→pollinations рисует; pollinations 500→flux спасает;
+  webp пропускаем→flux; все молчат→честная ошибка со списком; flux без биндинга).
+  tsc чисто, бандл 144.39 KiB. VERSION v0.3.38 (brain v3.8).
