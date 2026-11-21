@@ -1016,11 +1016,9 @@ export async function workersAiImage(prompt, opts = {}) {
   if (!ai) return { error: 'нет биндинга AI' }
   try {
     const r = await Promise.race([
-      ai.run('@cf/black-forest-labs/flux-1-schnell', {
-        prompt: String(prompt || '').slice(0, 900),
-        num_steps: 4,
-        max_sequence_length: 64,
-      }),
+      // v0.3.38b: схема биндинга больше не принимает num_steps/max_sequence_length
+      // («5006: Additional or unevaluated properties not allowed») — только prompt
+      ai.run('@cf/black-forest-labs/flux-1-schnell', { prompt: String(prompt || '').slice(0, 900) }),
       new Promise((_, rej) => setTimeout(() => rej(new Error('flux >20с')), 20000)),
     ])
     const b64 = typeof r === 'string' ? r : (r?.image || '')
