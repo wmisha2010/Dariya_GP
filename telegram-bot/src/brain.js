@@ -1023,7 +1023,10 @@ export async function workersAiImage(prompt, opts = {}) {
     ])
     const b64 = typeof r === 'string' ? r : (r?.image || '')
     if (!b64 || b64.length < 1000) return { error: 'flux: пустой ответ' }
-    return { image: { b64, mime: 'image/png', model: 'flux-1-schnell' } }
+    // v0.3.38c: flux отдаёт JPEG-байты под видом PNG — определяем mime по сигнатуре
+    // ('/9j/' = FFD8FF JPEG, 'iVBOR' = 89504E47 PNG), Telegram важен честный тип
+    const mime = String(b64).startsWith('/9j/') ? 'image/jpeg' : 'image/png'
+    return { image: { b64, mime, model: 'flux-1-schnell' } }
   } catch (e) {
     return { error: 'flux: ' + String(e?.message || e).slice(0, 160) }
   }

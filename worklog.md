@@ -1448,3 +1448,12 @@ HTML страниц — свежий (вместе с выключателем) 
 - Тесты 233→238 (+5: gemini 400→pollinations рисует; pollinations 500→flux спасает;
   webp пропускаем→flux; все молчат→честная ошибка со списком; flux без биндинга).
   tsc чисто, бандл 144.39 KiB. VERSION v0.3.38 (brain v3.8).
+
+- ФИНАЛ v0.3.38b/c: flux-1-schnell — только {prompt} (схема биндинга не принимает
+  num_steps/max_sequence_length: «5006: Additional or unevaluated properties not
+  allowed», вскрыл diagnostics'ом tried в /image-test). Прод: ok:true, 1024×1024
+  за ~2.9с. flux отдаёт JPEG-байты — mime определяю по сигнатуре (/9j/=jpeg).
+  Pollinations остался в цепочке, но из CF-воркера даёт 402 (гейтит датацентровые
+  IP; из песочницы тот же URL — 200), referrer не помог. Реальный художник —
+  flux-1-schnell: бесплатно, без ключей, 2.9с. Gemini вернётся первым, как только
+  владелец пришлёт свежий GEMINI_API_KEY (секрет).
