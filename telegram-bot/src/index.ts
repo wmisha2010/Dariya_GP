@@ -62,7 +62,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.41 (brain v3.11)'
+const VERSION = 'v0.3.42 (brain v3.12)'
 // Зеркальный режим «голос на голос» (v0.3.37): включён — русский голос берём
 // из веб-версии (POST /api/tts → msedge-tts ru-RU-SvetlanaNeural, тот же тембр,
 // что в вебе; бесплатно и без ключей). aura-1 (Workers AI) для русского
