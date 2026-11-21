@@ -614,7 +614,7 @@ async function handleTtsTest(url: URL, env: Env): Promise<Response> {
         if (!res.ok) { attempts.push({ model, status, error: errText }); continue }
         const buf = new Uint8Array(await res.arrayBuffer())
         let bin = ''
-        for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000))
+        for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000))
         const audioB64 = btoa(bin)
         let heard2 = ''
         try {
