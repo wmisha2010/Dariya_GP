@@ -3,5 +3,10 @@ name = "daria-bot"
 main = "src/index.ts"
 compatibility_date = "2026-01-01"
 
+# Workers AI (v0.3.29): whisper для расшифровки голосовых — без ключей,
+# бесплатно в рамках нейронов воркспейса, аудио не хранится
+[ai]
+binding = "AI"
+
 [observability]
 enabled = true

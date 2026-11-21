@@ -1289,3 +1289,23 @@ HTML страниц — свежий (вместе с выключателем) 
 - Тесты 214→217 (+3: chatter в system; history чистый; без chatter маркера нет).
   Урок: маркер в тесте искали с закрывающей скобкой «группы]», а в блоке маркера
   после «группы» тире. check:bundle 127.27 KiB.
+
+## v0.3.29 (2026-11-21) — голосовые РАСШИФРОВЫВАЮТСЯ: Workers AI whisper (без ключей!)
+- Владелец: «как сделать, чтобы она могла расшифровывать голосовые?». До сих пор
+  цепочка transcribeAudio была «Gemini (ключ мёртв) → Coarena (аудио не берёт)» =
+  все мозги закрыты, владелец ждал классический AIza-ключ. Обошлись БЕЗ ключей:
+  Cloudflare Workers AI whisper работает биндингом прямо в воркере.
+- wrangler.toml NEW: [ai] binding = "AI" — деплоится вместе с воркером, никаких
+  действий в дашборде не нужно. Бесплатно в рамках нейронов воркспейса
+  (whisper ~$0.000453/мин аудио на платном), zero data retention — аудио не хранится.
+- brain.js: transcribeAudio шаг 0 = workers-ai: opts.aiBinding?.run('@cf/openai/whisper',
+  { audio: b64 }) — b64 уже готов от tgFileB64 (конверсий нет), вход base64-строкой
+  по официальному туториалу CF; ответ { text, word_count, words[], vtt } → text.
+  Пусто/ошибка → цепочка идёт дальше (Gemini/Coarena как были). tried += 'workers-ai
+  whisper'. index.ts: interface AiBinding { run(...) }, Env.AI, aiBinding: env.AI в
+  обоих вызовах (handleMessage голосовые + /voice-test). VERSION v0.3.29, brain v3.7.
+- Тесты 217→220 (+3: биндинг отвечает → текст, b64 ушло как {audio}, цепочка
+  остановилась; без биндинга шаг пропущен, tried без workers-ai; биндинг упал →
+  coarena ответила). Урок: в УСПЕШНОМ ответе transcribeAudio поля tried нет —
+  ассерция «Array.isArray(r3.tried)» была всегда false, чинил ассерцию не код.
+  tsc чисто, check:bundle 128.18 KiB.

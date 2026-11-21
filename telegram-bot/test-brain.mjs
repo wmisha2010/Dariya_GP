@@ -1223,5 +1223,40 @@ console.log('── Свежий контекст группы (groupChatter в 
   }
 }
 
+console.log('── Голосовые: Workers AI whisper (биндинг env.AI) ──')
+{
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  try {
+    // whisper доступен → нулевой мозг, цепочка дальше не идёт, b64 уходит как {audio}
+    const runs = []
+    const aiOk = { run: async (model, input) => { runs.push({ model, input }); return { text: '  Привет Дария  ', word_count: 2 } } }
+    const r1 = await transcribeAudio('T2dnUwAC', 'audio/ogg', { aiBinding: aiOk, geminiKey: 'gk' })
+    check('whisper биндинг: b64 ушло как {audio}, текст возвращён, цепочка остановилась',
+      r1.text === 'Привет Дария' && String(r1.model).includes('workers-ai')
+      && runs.length === 1 && runs[0].model === '@cf/openai/whisper' && runs[0].input.audio === 'T2dnUwAC')
+    // без биндинга шаг пропущен — tried без workers-ai, поведение прежнее
+    globalThis.fetch = async () => new Response('{"error":"quota"}', { status: 429 })
+    const r2 = await transcribeAudio('A'.repeat(100), 'audio/ogg', { coarenaKey: 'k', geminiKey: 'gk' })
+    check('без биндинга шаг пропущен (tried без workers-ai)',
+      !r2.text && Array.isArray(r2.tried) && !r2.tried.some((t) => String(t).includes('workers-ai')))
+    // whisper упал → цепочка продолжается, coarena отвечает
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('chat/completions')) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: 'Запаска услышала' } }] }), { status: 200 })
+      }
+      return new Response('{"error":"no"}', { status: 500 })
+    }
+    const r3 = await transcribeAudio('A'.repeat(100), 'audio/ogg', { aiBinding: { run: async () => { throw new Error('биндинг сдох') } }, coarenaKey: 'k' })
+    // в успешном ответе tried нет (он приходит только при полном провале) — важен сам текст
+    check('whisper упал → цепочка пошла дальше (coarena ответила)', r3.text === 'Запаска услышала')
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+    resetCoarenaBreaker()
+  }
+}
+
 console.log(`\nИтого: ${passed} прошло, ${failed} упало`)
 process.exit(failed ? 1 : 0)

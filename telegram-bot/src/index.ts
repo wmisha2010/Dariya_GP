@@ -35,6 +35,11 @@ import {
   readPage,
 } from './brain.js'
 
+/** Cloudflare Workers AI: биндинг [ai] в wrangler.toml — whisper без ключей (v0.3.29) */
+interface AiBinding {
+  run(model: string, input: Record<string, unknown>): Promise<unknown>
+}
+
 export interface Env {
   TELEGRAM_BOT_TOKEN: string
   COARENA_API_KEY?: string
@@ -44,6 +49,7 @@ export interface Env {
   GEMINI_API_KEY?: string
   GEMINI_BASE_URL?: string
   GEMINI_MODEL?: string
+  AI?: AiBinding
   TIMEZONE?: string
   WEB_APP_URL?: string
   WEB_SEARCH?: string
@@ -54,7 +60,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.28 (brain v3.6)'
+const VERSION = 'v0.3.29 (brain v3.7)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -245,6 +251,7 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
       return
     }
     const r = await transcribeAudio(audio.b64, audio.mime, {
+      aiBinding: env.AI,
       coarenaKey: env.COARENA_API_KEY || '',
       openrouterKey: env.OPENROUTER_API_KEY || '',
       geminiKey: env.GEMINI_API_KEY || '',
@@ -555,6 +562,7 @@ async function handleVoiceTest(url: URL, env: Env): Promise<Response> {
   const attempts: any[] = []
   const t0 = Date.now()
   const r = await transcribeAudio(TEST_VOICE_B64, 'audio/ogg', {
+    aiBinding: env.AI,
     coarenaKey: env.COARENA_API_KEY || '',
     openrouterKey: env.OPENROUTER_API_KEY || '',
     geminiKey: env.GEMINI_API_KEY || '',

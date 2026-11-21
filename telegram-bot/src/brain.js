@@ -992,6 +992,28 @@ export async function transcribeAudio(b64, mime = 'audio/ogg', opts = {}) {
   let lastError = ''
   const prompt = 'Это голосовое сообщение из Telegram (скорее всего на русском). Расшифруй аудио. Верни ТОЛЬКО текст расшифровки, без комментариев, без кавычек и без форматирования.'
 
+  // 0) Cloudflare Workers AI (whisper): биндинг env.AI — без ключей и без лимитов
+  //    сторонних API, аудио не хранится (zero data retention). b64 уже готов от
+  //    tgFileB64; по официальному туториалу CF аудио уходит base64-строкой.
+  //    Ответ: { text, word_count, words[], vtt }.
+  const ai = opts.aiBinding
+  if (ai?.run && Date.now() < deadline) {
+    tried.push('workers-ai whisper')
+    try {
+      const out = await ai.run('@cf/openai/whisper', { audio: b64 })
+      const text = String(out?.text || '').trim()
+      if (text) {
+        debug?.push({ brain: 'workers-ai', model: '@cf/openai/whisper', ok: true })
+        return { text, model: 'workers-ai @cf/openai/whisper' }
+      }
+      lastError = 'workers-ai: пустой ответ'
+      debug?.push({ brain: 'workers-ai', ok: false, why: 'пустой ответ' })
+    } catch (e) {
+      lastError = 'workers-ai: ' + String(e?.message || e)
+      debug?.push({ brain: 'workers-ai', ok: false, why: 'ошибка биндинга' })
+    }
+  }
+
   // 1) Gemini native — прямой audio/ogg через inlineData
   const geminiKey = opts.geminiKey || ''
   const bridgeMode = Boolean(opts.geminiBaseUrl)
