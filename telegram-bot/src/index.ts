@@ -60,7 +60,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.29 (brain v3.7)'
+const VERSION = 'v0.3.30 (brain v3.7)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -485,6 +485,42 @@ async function handleReadTest(url: URL, env: Env): Promise<Response> {
   return json({ ok: true, url: p.url, title: p.title, chars: p.text.length, preview: p.text.slice(0, 600), ms: Date.now() - t0 })
 }
 
+/** Диагностика биндинга Workers AI (v0.3.30): жив ли биндинг и что за ошибка у whisper.
+ *  Три зонда: текстовая модель (биндинг вообще работает?), whisper с b64-строкой,
+ *  whisper с сырыми байтами — по ответам видно, какой формат входа правильный. */
+async function handleAiTest(url: URL, env: Env): Promise<Response> {
+  const json = (obj: any, status = 200) =>
+    new Response(JSON.stringify(obj, null, 2), {
+      status,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    })
+  const key = env.SEARCH_TEST_KEY || ''
+  if (key && url.searchParams.get('key') !== key) return json({ ok: false, error: 'неверный key' }, 403)
+  const ai = env.AI
+  if (!ai?.run) return json({ ok: false, error: 'биндинг AI отсутствует (env.AI undefined)' })
+  const out: any = { binding: 'есть' }
+  try {
+    const r: any = await ai.run('@cf/meta/llama-3.1-8b-instruct', { messages: [{ role: 'user', content: 'Ответь одним словом: живой' }], max_tokens: 16 })
+    out.textModel = { ok: true, sample: String(r?.response ?? '').slice(0, 80) }
+  } catch (e: any) {
+    out.textModel = { ok: false, error: String(e?.message || e).slice(0, 300) }
+  }
+  try {
+    const r: any = await ai.run('@cf/openai/whisper', { audio: TEST_VOICE_B64 })
+    out.whisperB64 = { ok: true, text: String(r?.text || '').slice(0, 120) }
+  } catch (e: any) {
+    out.whisperB64 = { ok: false, error: String(e?.message || e).slice(0, 300) }
+  }
+  try {
+    const bytes = Uint8Array.from(atob(TEST_VOICE_B64), (c) => c.charCodeAt(0))
+    const r: any = await ai.run('@cf/openai/whisper', { audio: bytes })
+    out.whisperBytes = { ok: true, text: String(r?.text || '').slice(0, 120) }
+  } catch (e: any) {
+    out.whisperBytes = { ok: false, error: String(e?.message || e).slice(0, 300) }
+  }
+  return json(out)
+}
+
 /** Диагностика «мозга»: откуда воркер ходит в сеть, жив ли ключ Gemini, тестовый ответ */
 async function handleImageTest(url: URL, env: Env): Promise<Response> {
   const json = (obj: any, status = 200) =>
@@ -881,6 +917,7 @@ export default {
     if (url.pathname === '/voice-test' && request.method === 'GET') return handleVoiceTest(url, env)
     if (url.pathname === '/gemini-key-test' && request.method === 'GET') return handleGeminiKeyTest(url, env)
     if (url.pathname === '/read-test' && request.method === 'GET') return handleReadTest(url, env)
+    if (url.pathname === '/ai-test' && request.method === 'GET') return handleAiTest(url, env)
     if (url.pathname === '/telegram-webhook' && request.method === 'POST') return handleWebhook(request, env, ctx)
     return new Response('not found', { status: 404 })
   },

@@ -1009,8 +1009,9 @@ export async function transcribeAudio(b64, mime = 'audio/ogg', opts = {}) {
       lastError = 'workers-ai: пустой ответ'
       debug?.push({ brain: 'workers-ai', ok: false, why: 'пустой ответ' })
     } catch (e) {
-      lastError = 'workers-ai: ' + String(e?.message || e)
-      debug?.push({ brain: 'workers-ai', ok: false, why: 'ошибка биндинга' })
+      const why = String(e?.message || e).slice(0, 160)
+      lastError = 'workers-ai: ' + why
+      debug?.push({ brain: 'workers-ai', ok: false, why: 'биндинг: ' + why })
     }
   }
 
