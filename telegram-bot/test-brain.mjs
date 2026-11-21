@@ -1253,6 +1253,9 @@ console.log('── Голосовые: Workers AI whisper (биндинг env.A
     const r3 = await transcribeAudio('A'.repeat(100), 'audio/ogg', { aiBinding: { run: async () => { throw new Error('биндинг сдох') } }, coarenaKey: 'k' })
     // в успешном ответе tried нет (он приходит только при полном провале) — важен сам текст
     check('whisper упал → цепочка пошла дальше (coarena ответила)', r3.text === 'Запаска услышала')
+    // whisper заядренен навсегда → таймер гонки спасает ответ (коарена подхватывает)
+    const r4 = await transcribeAudio('A'.repeat(100), 'audio/ogg', { aiBinding: { run: () => new Promise(() => {}) }, coarenaKey: 'k', aiTimeoutMs: 50 })
+    check('whisper висит → таймаут гонки → цепочка дальше', r4.text === 'Запаска услышала')
   } finally {
     globalThis.fetch = realFetch
     console.error = realErr

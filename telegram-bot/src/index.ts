@@ -60,7 +60,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.31 (brain v3.7)'
+const VERSION = 'v0.3.32 (brain v3.7)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -499,26 +499,37 @@ async function handleAiTest(url: URL, env: Env): Promise<Response> {
   const ai = env.AI
   if (!ai?.run) return json({ ok: false, error: 'биндинг AI отсутствует (env.AI undefined)' })
   const out: any = { binding: 'есть' }
-  try {
+  const probe = url.searchParams.get('probe') || ''
+  const run = async (name: string, fn: () => Promise<any>) => {
+    if (probe && probe !== name) return
+    const s = Date.now()
+    try {
+      const r = await fn()
+      out[name] = { ok: true, ms: Date.now() - s, ...r }
+    } catch (e: any) {
+      out[name] = { ok: false, ms: Date.now() - s, error: String(e?.message || e).slice(0, 200) }
+    }
+  }
+  await run('textModel', async () => {
     const r: any = await ai.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', { messages: [{ role: 'user', content: 'Ответь одним словом: живой' }], max_tokens: 16 })
-    out.textModel = { ok: true, sample: String(r?.response ?? '').slice(0, 80) }
-  } catch (e: any) {
-    out.textModel = { ok: false, error: String(e?.message || e).slice(0, 300) }
-  }
-  try {
+    return { sample: String(r?.response ?? '').slice(0, 80) }
+  })
+  await run('whisperArray', async () => {
     // правильный по схеме вход: { audio: массив байтов 0–255 }
-    const r: any = await ai.run('@cf/openai/whisper', { audio: Array.from(atob(TEST_VOICE_B64), (c) => c.charCodeAt(0)) })
-    out.whisperArray = { ok: true, text: String(r?.text || '').slice(0, 120) }
-  } catch (e: any) {
-    out.whisperArray = { ok: false, error: String(e?.message || e).slice(0, 300) }
-  }
-  try {
+    const r: any = await Promise.race([
+      ai.run('@cf/openai/whisper', { audio: Array.from(atob(TEST_VOICE_B64), (c) => c.charCodeAt(0)) }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('проба >45с')), 45000)),
+    ])
+    return { text: String(r?.text || '').slice(0, 120) }
+  })
+  await run('whisperTopString', async () => {
     // резервный вариант схемы: весь вход — бинарная строка
-    const r: any = await (ai.run as any)('@cf/openai/whisper', TEST_VOICE_B64)
-    out.whisperTopString = { ok: true, text: String(r?.text || '').slice(0, 120) }
-  } catch (e: any) {
-    out.whisperTopString = { ok: false, error: String(e?.message || e).slice(0, 300) }
-  }
+    const r: any = await Promise.race([
+      (ai.run as any)('@cf/openai/whisper', TEST_VOICE_B64),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('проба >45с')), 45000)),
+    ])
+    return { text: String(r?.text || '').slice(0, 120) }
+  })
   return json(out)
 }
 
