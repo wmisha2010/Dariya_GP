@@ -989,7 +989,7 @@ export async function pollinationsImage(prompt, opts = {}) {
     tried.push(`pollinations/${model}`)
     try {
       const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(String(prompt || '').slice(0, 900))}` +
-        `?width=1024&height=1024&nologo=true&model=${model}&seed=${Math.floor(Math.random() * 1e9)}`
+        `?width=1024&height=1024&nologo=true&model=${model}&referrer=daria-bot&seed=${Math.floor(Math.random() * 1e9)}`
       const res = await fetch(url, { signal: AbortSignal.timeout(20000) })
       if (!res.ok) { tried[tried.length - 1] += ` HTTP ${res.status}`; continue }
       const buf = new Uint8Array(await res.arrayBuffer())
@@ -1047,7 +1047,7 @@ export async function generateImage(prompt, opts = {}) {
   tried.push(...(p.tried || []))
   const f = await workersAiImage(prompt, opts)
   if (f.image) return { image: f.image, tried, lastError }
-  tried.push('flux-1-schnell')
+  tried.push(`flux-1-schnell: ${f.error || 'неизвестная ошибка'}`)
   return { error: 'все художники недоступны', tried, lastError: lastError || f.error || '' }
 }
 
