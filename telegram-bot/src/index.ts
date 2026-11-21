@@ -60,7 +60,7 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.30 (brain v3.7)'
+const VERSION = 'v0.3.31 (brain v3.7)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -500,23 +500,24 @@ async function handleAiTest(url: URL, env: Env): Promise<Response> {
   if (!ai?.run) return json({ ok: false, error: 'биндинг AI отсутствует (env.AI undefined)' })
   const out: any = { binding: 'есть' }
   try {
-    const r: any = await ai.run('@cf/meta/llama-3.1-8b-instruct', { messages: [{ role: 'user', content: 'Ответь одним словом: живой' }], max_tokens: 16 })
+    const r: any = await ai.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', { messages: [{ role: 'user', content: 'Ответь одним словом: живой' }], max_tokens: 16 })
     out.textModel = { ok: true, sample: String(r?.response ?? '').slice(0, 80) }
   } catch (e: any) {
     out.textModel = { ok: false, error: String(e?.message || e).slice(0, 300) }
   }
   try {
-    const r: any = await ai.run('@cf/openai/whisper', { audio: TEST_VOICE_B64 })
-    out.whisperB64 = { ok: true, text: String(r?.text || '').slice(0, 120) }
+    // правильный по схеме вход: { audio: массив байтов 0–255 }
+    const r: any = await ai.run('@cf/openai/whisper', { audio: Array.from(atob(TEST_VOICE_B64), (c) => c.charCodeAt(0)) })
+    out.whisperArray = { ok: true, text: String(r?.text || '').slice(0, 120) }
   } catch (e: any) {
-    out.whisperB64 = { ok: false, error: String(e?.message || e).slice(0, 300) }
+    out.whisperArray = { ok: false, error: String(e?.message || e).slice(0, 300) }
   }
   try {
-    const bytes = Uint8Array.from(atob(TEST_VOICE_B64), (c) => c.charCodeAt(0))
-    const r: any = await ai.run('@cf/openai/whisper', { audio: bytes })
-    out.whisperBytes = { ok: true, text: String(r?.text || '').slice(0, 120) }
+    // резервный вариант схемы: весь вход — бинарная строка
+    const r: any = await (ai.run as any)('@cf/openai/whisper', TEST_VOICE_B64)
+    out.whisperTopString = { ok: true, text: String(r?.text || '').slice(0, 120) }
   } catch (e: any) {
-    out.whisperBytes = { ok: false, error: String(e?.message || e).slice(0, 300) }
+    out.whisperTopString = { ok: false, error: String(e?.message || e).slice(0, 300) }
   }
   return json(out)
 }

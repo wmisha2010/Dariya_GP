@@ -1000,7 +1000,9 @@ export async function transcribeAudio(b64, mime = 'audio/ogg', opts = {}) {
   if (ai?.run && Date.now() < deadline) {
     tried.push('workers-ai whisper')
     try {
-      const out = await ai.run('@cf/openai/whisper', { audio: b64 })
+      // схема входа (schema-input.json): объект { audio: массив байтов 0–255 }
+      // (Uint8Array нельзя — JSON-сериализация превращает его в {0:…,1:…})
+      const out = await ai.run('@cf/openai/whisper', { audio: Array.from(atob(b64), (c) => c.charCodeAt(0)) })
       const text = String(out?.text || '').trim()
       if (text) {
         debug?.push({ brain: 'workers-ai', model: '@cf/openai/whisper', ok: true })
