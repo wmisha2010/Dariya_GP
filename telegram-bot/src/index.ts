@@ -61,7 +61,11 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.35 (brain v3.7)'
+const VERSION = 'v0.3.36 (brain v3.7)'
+// Зеркальный режим «голос на голос»: выключен, пока в Workers AI нет русского
+// TTS — aura-1 читает кириллицу английской фонетикой (проверено round-trip'ом:
+// ASR услышал англ. бессмыслицу). Включить одним флагом, когда появится ru-голос.
+const VOICE_MIRROR = false
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -277,7 +281,7 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   // «записывает голосовое» вместо «печатает».
   const wantsVoice = isVoice
   const maybeVoiceReply = async (reply: string): Promise<boolean> => {
-    if (!wantsVoice) return false
+    if (!wantsVoice || !VOICE_MIRROR) return false
     action.current = 'record_voice'
     const t = await speakText(reply, { aiBinding: env.AI })
     if (!t.audioB64) return false
@@ -591,6 +595,44 @@ async function handleTtsTest(url: URL, env: Env): Promise<Response> {
   if (!ai?.run) return json({ ok: false, error: 'биндинг AI отсутствует (env.AI undefined)' })
   const phrase = (url.searchParams.get('phrase') || 'Привет! Я Дария, и я научилась отвечать голосом.').slice(0, 200)
   const speaker = url.searchParams.get('speaker') || 'luna'
+  // проба Coarena (OpenAI-прокси): /audio/speech — у OpenAI TTS русский родной
+  if (url.searchParams.get('brain') === 'coarena') {
+    const key = env.COARENA_API_KEY || ''
+    if (!key) return json({ ok: false, error: 'нет COARENA_API_KEY' })
+    const attempts: any[] = []
+    for (const model of ['tts-1', 'gpt-4o-mini-tts']) {
+      const s2 = Date.now()
+      try {
+        const res = await fetch('https://coarena.ai/api/v1/audio/speech', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, voice: 'alloy', input: phrase, response_format: 'opus' }),
+          signal: AbortSignal.timeout(30000),
+        })
+        const status = res.status
+        const errText = res.ok ? '' : (await res.text()).slice(0, 160)
+        if (!res.ok) { attempts.push({ model, status, error: errText }); continue }
+        const buf = new Uint8Array(await res.arrayBuffer())
+        let bin = ''
+        for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000))
+        const audioB64 = btoa(bin)
+        let heard2 = ''
+        try {
+          const w: any = await Promise.race([
+            ai.run('@cf/openai/whisper-large-v3-turbo', { audio: audioB64, language: 'ru', task: 'transcribe' }),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('whisper >30с')), 30000)),
+          ])
+          heard2 = String(w?.text || '').trim()
+        } catch (e: any) {
+          heard2 = 'whisper не смог: ' + String(e?.message || e).slice(0, 80)
+        }
+        attempts.push({ model, status, bytes: buf.length, ms: Date.now() - s2, heard: heard2 })
+      } catch (e: any) {
+        attempts.push({ model, error: String(e?.message || e).slice(0, 120), ms: Date.now() - s2 })
+      }
+    }
+    return json({ ok: true, brain: 'coarena', phrase, attempts })
+  }
   const s = Date.now()
   const t = await speakText(phrase, { aiBinding: ai, ttsSpeaker: speaker })
   const ms = Date.now() - s
