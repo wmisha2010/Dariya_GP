@@ -493,8 +493,9 @@ console.log('── Новости: Google News RSS вместо статей В
     check('newsSearch: разобрал живой заголовок', top.length === 1 && top[0].title === 'Живой заголовок')
     check('newsSearch: у победителя метка ленты', ['google-news', 'lenta', 'ria', 'tass'].includes(top[0].engine))
     const themed = await newsSearch('новости футбола')
-    check('newsSearch: тема → поиск по ленте Google News',
-      urls.some((u) => u.startsWith('https://news.google.com/rss/search?q=') && u.includes('%D1%84')))
+    check('newsSearch: тема → гонка Google News ↔ Bing News topic',
+      urls.some((u) => u.startsWith('https://news.google.com/rss/search?q=') && u.includes('%D1%84'))
+      && urls.some((u) => u.startsWith('https://www.bing.com/news/search?q=')))
     check('newsSearch: тема вернула результат', themed.length === 1)
     const viaWeb = await webSearch('свежие новости в мире ' + Date.now())
     check('webSearch: новостной запрос идёт в Google News, не в Википедию',
@@ -1417,6 +1418,59 @@ console.log('── translateImagePrompt: промпт на английский
   } finally {
     globalThis.fetch = realFetch
     console.error = realErr
+    resetCoarenaBreaker()
+  }
+}
+
+console.log('── Новости v0.3.40: описания в сниппете, Bing topic, Википедия мимо ──')
+{
+  // parseNewsRss: description → сниппет (Lenta/РИА/ТАСС/Bing), у google-news — нет
+  const lentaXml = '<rss><channel><item><title>Открыли новый мост</title><link>https://lenta.ru/x</link>' +
+    '<pubDate>Fri, 20 Nov 2026 10:00:00 GMT</pubDate><description>В Петербурге открыли трёхкилометровый мост через Неву: движение запустили раньше срока.</description></item></channel></rss>'
+  const li = parseNewsRss(lentaXml, 6, 'lenta')
+  check('parseNewsRss: description попал в сниппет', li.length === 1 && li[0].snippet.includes('трёхкилометровый мост'))
+  const gn = parseNewsRss('<rss><channel><item><title>A - Source</title><link>https://x.y/a</link>' +
+    '<pubDate>Fri, 20 Nov 2026 10:00:00 GMT</pubDate><description>&lt;a href="https://y.z"&gt;A&lt;/a&gt; Source</description></item></channel></rss>', 6, 'google-news')
+  check('parseNewsRss: google-news без description в сниппете', gn.length === 1 && !gn[0].snippet.includes('Source — '))
+  // newsSearch: тема → гонка google topic (в CF виснет) ↔ bing topic → bing спасает
+  const realFetch = globalThis.fetch
+  const urls = []
+  try {
+    globalThis.fetch = async (url) => {
+      urls.push(String(url))
+      if (String(url).includes('news.google.com/rss/search')) throw new Error('CF hang')
+      if (String(url).includes('bing.com/news')) {
+        return new Response('<rss><channel><item><title>Бавария потеряла очки</title><link>https://bing.n/1</link><pubDate>Fri, 20 Nov 2026 23:11:00 GMT</pubDate><description>Кельн увозит ничью из Мюнхена.</description></item></channel></rss>')
+      }
+      throw new Error('не то')
+    }
+    const themed = await newsSearch('новости футбола')
+    check('newsSearch: google topic завис → bing спас с описанием',
+      themed.length === 1 && themed[0].engine === 'bing-news' && themed[0].snippet.includes('Кельн увозит ничью'))
+    // webSearch fallback для новостей: всё молчит → Википедия НЕ зовётся → []
+    globalThis.fetch = async (url) => {
+      const u = String(url)
+      if (u.includes('wikipedia.org')) {
+        return new Response(JSON.stringify({ query: { search: [{ title: 'Мамаев', snippet: 'футболист' }] } }))
+      }
+      return Promise.reject(new Error('down'))
+    }
+    const viaWeb = await webSearch('новости регби ' + Date.now())
+    check('webSearch: новостной fallback без Википедии (все молчат → [])', viaWeb.length === 0)
+    const ref = await webSearch('кто такой Маск ' + Date.now())
+    check('webSearch: не-новостному запросу Википедия доступна', ref.length >= 1 && ref[0].engine === 'wikipedia')
+    // «новости сегодня» — теперь общий запрос → гонка главных лент, не topic-поиск
+    // (без Date.now()-суффикса: цифры на хвосте ломают $-анкор GENERIC_NEWS_RE)
+    const urls2 = []
+    globalThis.fetch = async (url) => {
+      urls2.push(String(url))
+      return Promise.reject(new Error('down'))
+    }
+    const gen = await webSearch('новости сегодня')
+    check('GENERIC_NEWS_RE: «новости сегодня» → гонка главных лент',
+      urls2.some((u) => u.includes('lenta.ru/rss/news')) && !urls2.some((u) => u.includes('bing.com/news/search')) && gen.length === 0)
+  } finally {
+    globalThis.fetch = realFetch
     resetCoarenaBreaker()
   }
 }

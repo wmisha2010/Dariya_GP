@@ -346,10 +346,13 @@ async function wikipediaSearch(q, max) {
 export const NEWS_RE =
   /новост|что нового|что происходит|что творится|что слышно|срочн(ые|ая|о) (новост|сообщ)/i
 
-/** Общий новостной запрос без темы («последние новости», «что происходит?»)
- *  — берём главную ленту топ-новостей, а не поиск RSS по слову «новости» */
+/** Общий новостной запрос без темы («последние новости», «что происходит?»,
+ *  «новости сегодня», «новости в мире») — берём главную ленту топ-новостей,
+ *  а не поиск RSS по слову «новости». Хвост «сегодня/за неделю/в мире» не
+ *  делает запрос тематическим (v0.3.40: раньше «новости сегодня» проваливался
+ *  в topic-поиск Google, который из CF-воркера виснет до таймаута). */
 const GENERIC_NEWS_RE =
-  /^(?:последние|свежие|главные|сегодняшние|срочные|топ)?\s*(?:новост[а-яё]*|события|что нового|что происходит|что творится|что слышно)\s*(?:в\s+(?:мире|россии|стране|сети|интернете)|у\s+нас)?\s*[?!.]*$/i
+  /^(?:последние|свежие|главные|сегодняшние|срочные|топ)?\s*(?:новост[а-яё]*|события|что нового|что происходит|что творится|что слышно)(?:\s+(?:сегодня|сейчас|за\s+(?:неделю|день|сутки|час|месяц)|в\s+(?:мире|россии|стране|сети|интернете)|у\s+нас))*\s*[?!.]*$/i
 
 /** Разбор RSS-ленты: <item> с title «Заголовок - Источник», link, pubDate */
 export function parseNewsRss(xml, max = 6, engine = 'google-news') {
@@ -377,7 +380,15 @@ export function parseNewsRss(xml, max = 6, engine = 'google-news') {
       return Number.isNaN(d.getTime()) ? '' : dateFmt.format(d)
     })()
     const source = pick('source') || (dash > 0 ? rawTitle.slice(dash + 3) : '')
-    out.push({ title, url, snippet: [source, when].filter(Boolean).join(', '), engine })
+    // <description> лент Lenta/РИА/ТАСС/Bing — 1-2 предложения сути новости: без
+    // них модель отвечает по одним заголовкам (жалоба владельца 2026-11-21).
+    // У google-news description — повтор заголовка ссылками: пропускаем.
+    let snippet = [source, when].filter(Boolean).join(', ')
+    if (engine !== 'google-news') {
+      const desc = stripTags(pick('description')).slice(0, 180)
+      if (desc) snippet = snippet ? `${snippet} — ${desc}` : desc
+    }
+    out.push({ title, url, snippet, engine })
   }
   return out
 }
@@ -394,8 +405,9 @@ const NEWS_FEEDS = [
 ]
 
 async function fetchNewsFeed(name, url, max) {
+  // Браузерный UA: Bing News RSS лоялен к нему, а «DariaBot/0.3» у Bing не проверен
   const res = await fetch(url, {
-    headers: { 'User-Agent': 'DariaBot/0.3 (personal assistant bot)', 'Accept-Language': 'ru-RU,ru;q=0.9' },
+    headers: { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0', 'Accept-Language': 'ru-RU,ru;q=0.9' },
     signal: AbortSignal.timeout(5000),
   })
   if (!res.ok) throw new Error(name + ' ' + res.status)
@@ -404,19 +416,34 @@ async function fetchNewsFeed(name, url, max) {
   return items
 }
 
-/** Живые новости: общий запрос («последние новости», «что происходит?») — гонка
- *  топ-лент; с темой («новости футбола») — поиск по ленте Google News
- *  (тематического поиска у российских RSS нет, при сбое — обычный поиск движков). */
+/** Тематический поиск новостей через Bing News RSS (v0.3.40): формат=RSS,
+ *  описания с сутью новости, жив из датацентра Cloudflare. */
+function bingNewsTopic(q, max) {
+  return fetchNewsFeed(
+    'bing-news',
+    'https://www.bing.com/news/search?q=' + encodeURIComponent(q) + '&format=RSS&setmkt=ru-RU',
+    max,
+  )
+}
+
+/** Живые новости: общий запрос («последние новости», «новости сегодня», «что
+ *  происходит?») — гонка топ-лент; с темой («новости футбола») — гонка
+ *  Google News topic (из CF-воркера виснет до таймаута) ↔ Bing News topic —
+ *  побеждает первый валидный RSS; если оба молчат, webSearch отыграет обычной
+ *  гонкой движков. */
 export async function newsSearch(query, max = 6) {
   const t = (query || '').trim()
   if (!t || GENERIC_NEWS_RE.test(t)) {
     return Promise.any(NEWS_FEEDS.map(([name, feed]) => fetchNewsFeed(name, feed(), max)))
   }
-  return fetchNewsFeed(
-    'google-news',
-    'https://news.google.com/rss/search?q=' + encodeURIComponent(t) + '&hl=ru&gl=RU&ceid=RU:ru',
-    max,
-  )
+  return Promise.any([
+    fetchNewsFeed(
+      'google-news',
+      'https://news.google.com/rss/search?q=' + encodeURIComponent(t) + '&hl=ru&gl=RU&ceid=RU:ru',
+      max,
+    ),
+    bingNewsTopic(t, max),
+  ])
 }
 
 /** Запросы про курс валют — отвечаем точными данными ЦБ РФ вместо сниппетов (сниппеты врут датой) */
@@ -690,7 +717,10 @@ export async function webSearch(query, opts = {}) {
       return results.map((r) => ({ ...r, engine: name })) // метка победителя для диагностики
     })(),
   )
-  tasks.push(wikipediaSearch(q, max).then((rs) => rs.map((r) => ({ ...r, engine: 'wikipedia' }))))
+  // Новостному fallback'у Википедия только мешает: на «новости футбола» она
+  // побеждает гонку и отвечает «Википедия: Мамаев…» вместо новостей (прод
+  // 2026-11-21). Энциклопедия — для фактов, не для свежих новостей.
+  if (!NEWS_RE.test(q)) tasks.push(wikipediaSearch(q, max).then((rs) => rs.map((r) => ({ ...r, engine: 'wikipedia' }))))
   let results = []
   try {
     results = await Promise.any(tasks)
