@@ -31,6 +31,8 @@ import {
   extractImageIntent,
   geminiImage,
   transcribeAudio,
+  readPagesContext,
+  readPage,
 } from './brain.js'
 
 export interface Env {
@@ -45,12 +47,13 @@ export interface Env {
   TIMEZONE?: string
   WEB_APP_URL?: string
   WEB_SEARCH?: string
+  WEB_PAGE_READ?: string
   SEARCH_TEST_KEY?: string
 }
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.26 (brain v3.5)'
+const VERSION = 'v0.3.27 (brain v3.6)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -268,6 +271,15 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
       const seed = withCityContext(command, prevUserTexts)
       const results = await webSearch(buildSearchQuery(seed))
       webContext = formatSearchContext(results, command)
+      // Чтение страниц целиком (v0.3.27): топ-2 результата из выдачи → текст
+      // статьи в промпт. ≥2 результатов — точные источники (погода/курсы) идут
+      // одним результатом и не читаются; страницы качаются параллельно (≤6 с).
+      if ((env.WEB_PAGE_READ || '') !== 'off' && results.length >= 2) {
+        try {
+          const pages = await readPagesContext(results, { limit: 2 })
+          if (pages) webContext = `${webContext}\n\n${pages}`
+        } catch { /* страницы не читаются — отвечаем по сниппетам */ }
+      }
     } catch { /* без поиска — ответим из знаний */ }
   }
 
@@ -396,6 +408,26 @@ async function handleSearchTest(url: URL, env: Env): Promise<Response> {
   } catch (e: any) {
     return json({ ok: false, error: String(e?.message || e), ms: Date.now() - t0 }, 500)
   }
+}
+
+/** Диагностика чтения страниц: ?url=… → что Дария реально вырезает из сайта */
+async function handleReadTest(url: URL, env: Env): Promise<Response> {
+  const json = (obj: any, status = 200) =>
+    new Response(JSON.stringify(obj, null, 2), {
+      status,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    })
+  const key = env.SEARCH_TEST_KEY || ''
+  if (key && url.searchParams.get('key') !== key) return json({ ok: false, error: 'неверный key' }, 403)
+  const target = (url.searchParams.get('url') || '').trim()
+  if (!/^https?:\/\//i.test(target)) return json({ ok: false, error: 'укажите ?url=https://…' }, 400)
+  const t0 = Date.now()
+  const p: any = await readPage(target, { timeoutMs: 10000, maxChars: 6000 }).catch((e: any) => ({
+    error: String(e?.message || e),
+    url: target,
+  }))
+  if (p.error) return json({ ok: false, error: p.error, url: target, ms: Date.now() - t0 }, 502)
+  return json({ ok: true, url: p.url, title: p.title, chars: p.text.length, preview: p.text.slice(0, 600), ms: Date.now() - t0 })
 }
 
 /** Диагностика «мозга»: откуда воркер ходит в сеть, жив ли ключ Gemini, тестовый ответ */
@@ -792,6 +824,7 @@ export default {
     if (url.pathname === '/vision-test' && request.method === 'GET') return handleVisionTest(url, env)
     if (url.pathname === '/voice-test' && request.method === 'GET') return handleVoiceTest(url, env)
     if (url.pathname === '/gemini-key-test' && request.method === 'GET') return handleGeminiKeyTest(url, env)
+    if (url.pathname === '/read-test' && request.method === 'GET') return handleReadTest(url, env)
     if (url.pathname === '/telegram-webhook' && request.method === 'POST') return handleWebhook(request, env, ctx)
     return new Response('not found', { status: 404 })
   },

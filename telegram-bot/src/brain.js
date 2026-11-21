@@ -720,6 +720,114 @@ export function formatSearchContext(results, query) {
 
 const YOUTUBE_LINK_RE = /(https?:\/\/)?(www\.)?(youtube\.com\/\S+|youtu\.be\/\S+)/i
 
+// ── Чтение страниц целиком (v0.3.27): сниппет → полный текст статьи ──────
+// Сниппет поисковика — 150–300 символов («оглавление»). Здесь качаем топ-N
+// страниц выдачи, вырезаем основной текст и отдаём модели настоящую статью.
+
+/** HTML → чистый текст: скрипты/стили/служебные секции долой, <article>/<main>
+ *  приоритетнее всего документа, блоки → переводы строк, числовые entity → символы. */
+export function extractPageText(html, maxChars = 6000) {
+  let h = String(html || '')
+  h = h
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<(nav|footer|header|aside|form|svg|iframe)[\s\S]*?<\/\1>/gi, ' ')
+  const art = h.match(/<(article|main)[^>]*>([\s\S]*?)<\/\1>/i)
+  if (art && art[2] && art[2].length > 500) h = art[2]
+  h = h
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|h[1-6]|tr|blockquote|figcaption)>/gi, '\n')
+  h = stripTags(h)
+  h = h
+    .replace(/&#(\d{1,5});/g, (_, n) => {
+      const c = Number(n)
+      return c > 0 && c < 0x110000 ? String.fromCodePoint(c) : ' '
+    })
+    .replace(/&#x([0-9a-f]{1,6});/gi, (_, n) => {
+      const c = parseInt(n, 16)
+      return c > 0 && c < 0x110000 ? String.fromCodePoint(c) : ' '
+    })
+    .replace(/&mdash;/g, '—').replace(/&ndash;/g, '–').replace(/&hellip;/g, '…')
+    .replace(/&laquo;/g, '«').replace(/&raquo;/g, '»')
+    .replace(/&[a-z]{2,8};/gi, ' ')
+  h = h.replace(/[ \t\u00A0]+/g, ' ').replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
+  if (h.length > maxChars) h = h.slice(0, maxChars) + '…'
+  return h
+}
+
+/** Заголовок <title> (без тегов, ≤120 символов) */
+function pageTitle(html) {
+  const m = String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i)
+  return stripTags(m ? m[1] : '').replace(/\s+/g, ' ').trim().slice(0, 120)
+}
+
+/** Качает страницу → {url, title, text} или {error, url}.
+ *  Кодировка: charset из Content-Type, иначе <meta charset> в первых 2 КБ;
+ *  windows-1251 и koi8-r декодируются штатно, при неудаче — utf-8. */
+export async function readPage(url, opts = {}) {
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': SEARCH_UA,
+      'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+      Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5',
+    },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(opts.timeoutMs || 8000),
+  })
+  if (!res.ok) return { error: `HTTP ${res.status}`, url }
+  const ct = res.headers.get('content-type') || ''
+  if (!/text\/html|application\/xhtml\+xml|text\/plain/i.test(ct)) {
+    return { error: `не HTML (${(ct.split(';')[0] || '?').trim()})`, url }
+  }
+  const buf = new Uint8Array(await res.arrayBuffer())
+  if (buf.length > 3000000) return { error: 'страница слишком большая', url }
+  let charset = (ct.match(/charset=([\w-]+)/i) || [])[1] || ''
+  if (!charset) {
+    const head = new TextDecoder('utf-8').decode(buf.subarray(0, 2048))
+    charset = (head.match(/charset=["']?([\w-]+)/i) || [])[1] || ''
+  }
+  let html
+  try {
+    html = new TextDecoder((charset || 'utf-8').toLowerCase()).decode(buf)
+  } catch {
+    html = new TextDecoder('utf-8').decode(buf)
+  }
+  if (/text\/plain/i.test(ct)) {
+    const max = opts.maxChars || 6000
+    const text = html.length > max ? html.slice(0, max) + '…' : html.trim()
+    if (!text) return { error: 'пустая страница', url }
+    return { url, title: '', text }
+  }
+  const text = extractPageText(html, opts.maxChars || 6000)
+  if (!text || text.length < 80) return { error: 'не вырезался осмысленный текст', url }
+  return { url, title: pageTitle(html), text }
+}
+
+/** Топ-N страниц выдачи параллельно → единый блок для промпта ('' если ни одна не читается). */
+export async function readPagesContext(results, opts = {}) {
+  const candidates = (results || [])
+    .filter((r) => /^https?:\/\//i.test(r.url || ''))
+    .slice(0, opts.limit || 2)
+  if (!candidates.length) return ''
+  const done = await Promise.all(
+    candidates.map((r) =>
+      readPage(r.url, { timeoutMs: opts.timeoutMs || 6000, maxChars: opts.maxChars || 5000 }).catch((e) => ({
+        error: String(e?.message || e),
+        url: r.url,
+      })),
+    ),
+  )
+  const ok = done.filter((p) => p.text)
+  if (!ok.length) return ''
+  const blocks = ok.map((p, i) => `── Страница ${i + 1}: ${p.title || p.url}\n${p.text}`)
+  return [
+    '[Содержимое страниц из выдачи — тексты прочитаны целиком, а не только сниппеты; среди источников бывают устаревшие: если внутри есть дата, считай её датой информации]',
+    ...blocks,
+  ].join('\n\n')
+}
+
 /** Лимит Telegram на одно сообщение (sendMessage) — 4096 символов UTF-16 */
 export const TG_MSG_LIMIT = 4096
 

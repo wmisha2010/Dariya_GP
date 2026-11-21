@@ -32,6 +32,9 @@ import {
   withImageParts,
   VISION_OPENROUTER,
   transcribeAudio,
+  extractPageText,
+  readPage,
+  readPagesContext,
 } from './src/brain.js'
 
 let passed = 0
@@ -1113,6 +1116,81 @@ console.log('── askLLM: Coarena — главный мозг (v0.3.16) ──
     globalThis.fetch = realFetch
     console.error = realErr
     resetCoarenaBreaker()
+  }
+}
+
+console.log('── Чтение страниц целиком: extractPageText / readPage / readPagesContext ──')
+{
+  // Чистка HTML: скрипты/стили/навигация долой, article приоритетнее, entity → символы
+  const page = `<html><head><title>Тест &amp; страница</title><style>.a{color:red}</style></head><body>
+    <nav>меню ссылки</nav><script>var evil = 1;</script>
+    <article><h1>Заголовок</h1><p>Первый абзац про кота &mdash; длинный и осмысленный.</p>
+    <p>Второй: цена 100&#160;руб.</p></article><footer>подвал</footer></body></html>`
+  const text = extractPageText(page, 6000)
+  check('скрипты/стили/нав/footer вырезаны, article сохранён',
+    text.includes('Первый абзац') && text.includes('Заголовок')
+      && !text.includes('evil') && !text.includes('.a{color') && !text.includes('меню') && !text.includes('подвал'))
+  check('entities декодированы (&mdash;, &#160;)',
+    text.includes('— длинный') && text.includes('100 руб'))
+  check('обрезка по maxChars с многоточием',
+    extractPageText(page, 30).length <= 31 && extractPageText(page, 30).endsWith('…'))
+
+  // readPage: cp1251 из Content-Type
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  // «Привет, мир!» в windows-1251: П=CF р=F0 и=E8 в=E2 е=E5 т=F2 м=EC р=F0
+  const cp1251 = new Uint8Array([0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2, 0x2C, 0x20, 0xEC, 0xE8, 0xF0, 0x21])
+  const filler = ' Эта статья содержит достаточно осмысленного текста, чтобы пройти минимальный порог длины восемьдесят символов.'
+  const enc = new TextEncoder()
+  const head = enc.encode('<html><head><title>Old School</title></head><body><p>')
+  const tail = enc.encode(filler + '</p></body></html>')
+  const bodyBytes = new Uint8Array(head.length + cp1251.length + tail.length)
+  bodyBytes.set(head, 0)
+  bodyBytes.set(cp1251, head.length)
+  bodyBytes.set(tail, head.length + cp1251.length)
+  globalThis.fetch = async (url, init) => {
+    const u = String(url)
+    if (u === 'https://old.example/ru') {
+      return new Response(bodyBytes, { status: 200, headers: { 'content-type': 'text/html; charset=windows-1251' } })
+    }
+    if (u === 'https://old.example/meta') {
+      // charset НЕ в Content-Type — должен вытащиться из <meta> (текст латиницей — совпадает с cp1251)
+      const metaHtml = '<html><head><meta charset="windows-1251"></head><body><p>Only ascii text here and here to pass the eighty character meaningful threshold for sure ok.</p></body></html>'
+      return new Response(enc.encode(metaHtml), { status: 200, headers: { 'content-type': 'text/html' } })
+    }
+    if (u === 'https://old.example/pdf') return new Response('x', { status: 200, headers: { 'content-type': 'application/pdf' } })
+    if (u === 'https://old.example/500') return new Response('err', { status: 500 })
+    return new Response('nope', { status: 404 })
+  }
+  try {
+    const p1 = await readPage('https://old.example/ru', { maxChars: 6000 })
+    check('cp1251 из Content-Type декодирован', !p1.error && p1.title === 'Old School' && p1.text.includes('Привет, мир!'))
+    const p2 = await readPage('https://old.example/meta', { maxChars: 6000 })
+    check('charset вытащен из <meta>, когда его нет в Content-Type', !p2.error && p2.text.length > 80)
+    const p3 = await readPage('https://old.example/pdf')
+    check('не-HTML (pdf) → честный отказ', p3.error.includes('не HTML'))
+    const p4 = await readPage('https://old.example/500')
+    check('HTTP 500 → error', p4.error === 'HTTP 500')
+
+    // readPagesContext: две страницы → блок с заголовками; все мёртвые → ''
+    const results = [
+      { title: 'А', url: 'https://old.example/ru', snippet: '' },
+      { title: 'Б', url: 'https://old.example/meta', snippet: '' },
+    ]
+    const block = await readPagesContext(results, { limit: 2 })
+    check('блок из двух страниц: маркер + оба заголовка',
+      block.includes('[Содержимое страниц') && block.includes('Old School') && block.includes('── Страница 1') && block.includes('── Страница 2'))
+    const empty = await readPagesContext([
+      { title: 'X', url: 'https://old.example/500' },
+      { title: 'Y', url: 'https://old.example/pdf' },
+    ])
+    check('ни одна не читается → пустой блок', empty === '')
+    const skipped = await readPagesContext([{ title: 'W', url: 'file:///etc/passwd' }])
+    check('не-http URL отфильтрован', skipped === '')
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
   }
 }
 
