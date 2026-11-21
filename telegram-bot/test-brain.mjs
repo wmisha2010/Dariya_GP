@@ -33,6 +33,7 @@ import {
   VISION_OPENROUTER,
   transcribeAudio,
   speakText,
+  speakTextWeb,
   extractPageText,
   readPage,
   readPagesContext,
@@ -1289,6 +1290,42 @@ console.log('── Голосовые ответы: speakText (TTS aura-1 че�
     const r3 = await speakText('долго', { aiBinding: { run: () => new Promise(() => {}) }, ttsTimeoutMs: 50 })
     check('TTS висит → таймаут гонки', !!r3.error && r3.error.includes('таймаут'))
   } finally {
+    console.error = realErr
+    resetCoarenaBreaker()
+  }
+}
+
+console.log('── speakTextWeb: русский голос через веб-версию ──')
+{
+  const realErr = console.error
+  const realFetch = globalThis.fetch
+  console.error = () => {}
+  try {
+    const bytes = new Uint8Array([73, 68, 51, 3, 0, 1, 2, 3])
+    const calls = []
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : null })
+      return { ok: true, arrayBuffer: async () => bytes.buffer }
+    }
+    const w1 = await speakTextWeb('Привет! Я Дария, и это голос из веба. Ты слышишь меня?', { webAppUrl: 'https://web.example/' })
+    check('веб-TTS: POST {text, voice:svetlana} на /api/tts → audioB64/mpeg/said',
+      !w1.error && w1.mime === 'audio/mpeg' && !!w1.audioB64
+      && calls.length === 1 && calls[0].url === 'https://web.example/api/tts'
+      && calls[0].body.voice === 'svetlana' && calls[0].body.text.includes('Дария')
+      && typeof w1.said === 'string' && w1.said.includes('Дария'))
+    const back = Uint8Array.from(atob(w1.audioB64), (c) => c.charCodeAt(0))
+    check('audioB64 веб-ТТС декодируется в те же байты', back.length === bytes.length && back.every((b, i) => b === bytes[i]))
+    // HTTP 500 → честная ошибка, бот уйдёт в текст
+    globalThis.fetch = async () => ({ ok: false, status: 500, arrayBuffer: async () => new ArrayBuffer(0) })
+    check('веб-TTS: HTTP 500 → ошибка', (await speakTextWeb('привет', { webAppUrl: 'https://web.example/' })).error === 'веб-TTS: HTTP 500')
+    // висящий веб → таймаут гонки
+    globalThis.fetch = async () => new Promise(() => {})
+    const w2 = await speakTextWeb('долго', { webAppUrl: 'https://web.example/', ttsTimeoutMs: 50 })
+    check('веб-TTS висит → таймаут гонки', !!w2.error && w2.error.includes('таймаут'))
+    check('веб-TTS: пустой текст → ошибка', (await speakTextWeb('  ', { webAppUrl: 'https://web.example/' })).error === 'пустой текст')
+    check('веб-TTS: нет адреса веба → ошибка', (await speakTextWeb('привет', {})).error.includes('WEB_APP_URL'))
+  } finally {
+    globalThis.fetch = realFetch
     console.error = realErr
     resetCoarenaBreaker()
   }

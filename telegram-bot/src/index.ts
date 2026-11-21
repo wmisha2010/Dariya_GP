@@ -32,6 +32,7 @@ import {
   geminiImage,
   transcribeAudio,
   speakText,
+  speakTextWeb,
   readPagesContext,
   readPage,
 } from './brain.js'
@@ -61,11 +62,13 @@ export interface Env {
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.36 (brain v3.7)'
-// Зеркальный режим «голос на голос»: выключен, пока в Workers AI нет русского
-// TTS — aura-1 читает кириллицу английской фонетикой (проверено round-trip'ом:
-// ASR услышал англ. бессмыслицу). Включить одним флагом, когда появится ru-голос.
-const VOICE_MIRROR = false
+const VERSION = 'v0.3.37 (brain v3.7)'
+// Зеркальный режим «голос на голос» (v0.3.37): включён — русский голос берём
+// из веб-версии (POST /api/tts → msedge-tts ru-RU-SvetlanaNeural, тот же тембр,
+// что в вебе; бесплатно и без ключей). aura-1 (Workers AI) для русского
+// бесполезна — читает кириллицу английской фонетикой. Сбоя синтеза не видно:
+// ответ уходит текстом.
+const VOICE_MIRROR = true
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
@@ -191,14 +194,14 @@ async function sendPhoto(token: string, chatId: number, b64: string, mime: strin
   return fetch(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', body: form })
 }
 
-/** Голосовое в Telegram (v0.3.35): sendVoice хочет OGG/Opus — aura-1 отдаёт ровно
- *  его; multipart-загрузка как у sendPhoto (v0.3.22). */
-async function sendVoice(token: string, chatId: number, b64: string, replyTo?: number) {
+/** Голосовое в Telegram (v0.3.35): sendVoice официально хочет OGG/Opus, mp3
+ *  клиенты тоже принимают как голосовое; multipart-загрузка как у sendPhoto. */
+async function sendVoice(token: string, chatId: number, b64: string, mime = 'audio/ogg', replyTo?: number) {
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
   const form = new FormData()
   form.append('chat_id', String(chatId))
   if (replyTo) form.append('reply_to_message_id', String(replyTo))
-  form.append('voice', new Blob([bytes], { type: 'audio/ogg' }), 'daria.ogg')
+  form.append('voice', new Blob([bytes], { type: mime }), mime === 'audio/mpeg' ? 'daria.mp3' : 'daria.ogg')
   return fetch(`https://api.telegram.org/bot${token}/sendVoice`, { method: 'POST', body: form })
 }
 
@@ -283,10 +286,16 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   const maybeVoiceReply = async (reply: string): Promise<boolean> => {
     if (!wantsVoice || !VOICE_MIRROR) return false
     action.current = 'record_voice'
-    const t = await speakText(reply, { aiBinding: env.AI })
+    // русский голос — из веб-версии (тот же SvetlanaNeural, что и в вебе);
+    // синтез не удался или Telegram отклонил mp3 → обычный текст, ответ не теряем
+    const t = await speakTextWeb(reply, { webAppUrl: env.WEB_APP_URL || DEFAULT_WEB_APP_URL })
     if (!t.audioB64) return false
     stopTyping()
-    await sendVoice(token, chatId, t.audioB64, isPrivate ? undefined : msg.message_id)
+    const r = await sendVoice(token, chatId, t.audioB64, t.mime || 'audio/mpeg', isPrivate ? undefined : msg.message_id)
+    if (!r?.ok) return false
+    // озвучили не всё (нарезка ~1200 симв по предложению) — хвост отправляем текстом
+    const rest = (t.said && reply.length > t.said.length) ? reply.slice(t.said.length).trim() : ''
+    if (rest) await sendMessageStopped(token, chatId, rest, isPrivate ? undefined : msg.message_id)
     return true
   }
 
@@ -632,6 +641,37 @@ async function handleTtsTest(url: URL, env: Env): Promise<Response> {
       }
     }
     return json({ ok: true, brain: 'coarena', phrase, attempts })
+  }
+  // проба веб-версии (v0.3.37): /api/tts — Edge SvetlanaNeural, русский родной;
+  // это тот же путь, что у зеркальных голосовых ответов бота
+  if (url.searchParams.get('brain') === 'web') {
+    const base = (env.WEB_APP_URL || DEFAULT_WEB_APP_URL).replace(/\/+$/, '')
+    const s2 = Date.now()
+    const t2 = await speakTextWeb(phrase, { webAppUrl: base })
+    if (t2.error || !t2.audioB64) return json({ ok: false, brain: 'web', ms: Date.now() - s2, error: t2.error })
+    let heard2 = ''
+    try {
+      const w: any = await Promise.race([
+        ai.run('@cf/openai/whisper-large-v3-turbo', { audio: t2.audioB64, language: 'ru', task: 'transcribe' }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('whisper >30с')), 30000)),
+      ])
+      heard2 = String(w?.text || '').trim()
+    } catch (e: any) {
+      heard2 = 'whisper не смог: ' + String(e?.message || e).slice(0, 80)
+    }
+    const bytes2 = Uint8Array.from(atob(t2.audioB64), (c) => c.charCodeAt(0))
+    if (url.searchParams.get('out') === 'audio') {
+      return new Response(bytes2, {
+        status: 200,
+        headers: {
+          'content-type': 'audio/mpeg',
+          'x-tts-ms': String(Date.now() - s2),
+          'x-tts-bytes': String(bytes2.length),
+          'x-tts-heard': encodeURIComponent(heard2),
+        },
+      })
+    }
+    return json({ ok: true, brain: 'web', ms: Date.now() - s2, bytes: bytes2.length, said: t2.said, heard: heard2 })
   }
   const s = Date.now()
   const t = await speakText(phrase, { aiBinding: ai, ttsSpeaker: speaker })

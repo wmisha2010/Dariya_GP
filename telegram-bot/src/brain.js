@@ -1015,6 +1015,41 @@ export async function speakText(text, opts = {}) {
   }
 }
 
+/** Русский голос через веб-версию (v0.3.37): POST {webAppUrl}/api/tts — там
+ *  msedge-tts с ru-RU-SvetlanaNeural (бесплатно, без ключей, тот же голос, что
+ *  и в вебе). Возврат { audioB64, mime:'audio/mpeg', said } — said это ровно
+ *  озвученный кусок (длинные ответы режутся по последнему предложению), чтобы
+ *  бот мог отправить хвост текстом. Гонка с таймером: /api/tts устанавливает
+ *  websocket, одна фраза ~5с, длинные — до 30с. */
+export async function speakTextWeb(text, opts = {}) {
+  const base = opts.webAppUrl
+  if (!base) return { error: 'нет адреса веб-версии (WEB_APP_URL)' }
+  const clean = String(text || '').trim()
+  if (!clean) return { error: 'пустой текст' }
+  const cut = clean.slice(0, 1200)
+  const stop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '))
+  const said = stop > 300 ? cut.slice(0, stop + 1) : cut
+  const timeoutMs = opts.ttsTimeoutMs || 30000
+  try {
+    const res = await Promise.race([
+      fetch(`${String(base).replace(/\/+$/, '')}/api/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: said, voice: opts.ttsVoice || 'svetlana' }),
+      }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error(`таймаут веб-TTS (>${timeoutMs}мс)`)), timeoutMs)),
+    ])
+    if (!res.ok) return { error: `веб-TTS: HTTP ${res.status}` }
+    const buf = new Uint8Array(await res.arrayBuffer())
+    if (!buf.length) return { error: 'веб-TTS: пустое аудио' }
+    let bin = ''
+    for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000))
+    return { audioB64: btoa(bin), mime: 'audio/mpeg', said }
+  } catch (e) {
+    return { error: 'tts-web: ' + String(e?.message || e).slice(0, 160) }
+  }
+}
+
 /** Расшифровывает аудио (base64). Успех: { text, model }, неудача: { error, tried, lastError }.
  *  Бюджет ~25 с — уложиться в фон Telegram. */
 export async function transcribeAudio(b64, mime = 'audio/ogg', opts = {}) {

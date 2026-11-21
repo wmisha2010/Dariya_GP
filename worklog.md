@@ -1403,3 +1403,25 @@ HTML страниц — свежий (вместе с выключателем) 
   любой OpenAI-совместимый TTS-ключ (OpenAI tts-1 / ElevenLabs — русский отличный).
   Сэмпл aura-1 оставлен в download/daria-voice-sample.ogg — слышно, как англ. голос
   бормочет кириллицу.
+
+## v0.3.37 (2026-11-21) — голосовые ответы ВКЛЮЧЕНЫ: русский голос из веб-версии
+- Владелец: «а в вебе у нас такой же функционал?». Проверка веба: там уже был
+  русский TTS — /api/tts с msedge-tts (ru-RU-SvetlanaNeural, бесплатно, без
+  ключей) + офлайн Piper (irina) + эмоциональная просодия; ввод — Web Speech API
+  (браузерный). Бот мог только whisper-ввод; aura-1 для русского — мусор (v0.3.36).
+- Решение — МОСТ: бот говорит тем же голосом Светланы через веб /api/tts.
+  Проба прода: POST {text, voice:'svetlana'} → HTTP 200, 49КБ mp3, 8.2с речи.
+- brain.js NEW speakTextWeb(text, {webAppUrl, voice}): POST {webAppUrl}/api/tts,
+  гонка-таймер 30с (websocket ~5с на фразу), нарезка по предложению ≤1200 симв,
+  возврат {audioB64, mime:'audio/mpeg', said} — said=озвученный кусок, чтобы бот
+  отправил хвост длинного ответа текстом.
+- index.ts: sendVoice — mime параметр (audio/mpeg → daria.mp3) + проверка r.ok
+  в maybeVoiceReply (Telegram отклонил mp3 → текстовый откат, ответ не теряем);
+  maybeVoiceReply → speakTextWeb(env.WEB_APP_URL || DEFAULT_WEB_APP_URL);
+  VOICE_MIRROR=false→TRUE — зеркальный режим «голос на голос» РАБОТАЕТ;
+  /tts-test?brain=web — проба с round-trip через whisper (?out=audio — mp3).
+- Урок: хередок в &&-цепочке bash ломает короткое замыкание — пуш улетел при
+  упавшем tsc (v0.3.36 fix TS2345 String.fromCharCode.apply→spread). Теперь
+  ворклог/пуш отдельной командой после зелёных гейтов.
+- Тесты 227→233 (+6: POST/voice/URL/said, байты туда-обратно, HTTP 500, таймаут,
+  пустой текст, нет адреса). tsc чисто, бандл 141.14 KiB. VERSION v0.3.37.
