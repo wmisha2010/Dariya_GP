@@ -1499,13 +1499,15 @@ console.log('── Погода v0.3.41: регион «Крым» мимо г�
   }
 }
 
-console.log('── /start v0.3.42: хелп для НейроСекты ──')
+console.log('── /start v0.3.43: хелп для НейроСекты (без рисования/радио/ютуба) ──')
 {
   const h = resolveCommand('/start')
   check('/start: срабатывает и возвращает текст', h?.handled === true && typeof h.text === 'string')
-  check('/start: секта и все реальные умения в хелпе',
-    h.text.includes('НейроСект') && h.text.includes('нарисуй') && h.text.includes('погугли')
-    && h.text.includes('голосом') && h.text.includes('фото') && h.text.includes('радио'))
+  check('/start: секта и рекламируемые умения в хелпе',
+    h.text.includes('НейроСект') && h.text.includes('погугли')
+    && h.text.includes('голосом') && h.text.includes('фото'))
+  check('/start: рисование/радио/ютуб в хелпе не рекламируются (владелец 2026-11-21, функции остались)',
+    !h.text.includes('нарисуй') && !h.text.includes('радио') && !h.text.toLowerCase().includes('ютуб'))
   check('/start: ответ на её сообщение — тоже триггер упомянут',
     h.text.includes('ответь на моё сообщение'))
 }
