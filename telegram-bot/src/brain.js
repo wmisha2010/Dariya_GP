@@ -998,21 +998,23 @@ export async function transcribeAudio(b64, mime = 'audio/ogg', opts = {}) {
   //    Ответ: { text, word_count, words[], vtt }.
   const ai = opts.aiBinding
   if (ai?.run && Date.now() < deadline) {
-    tried.push('workers-ai whisper')
+    tried.push('workers-ai whisper-turbo')
     try {
-      // схема входа (schema-input.json): объект { audio: массив байтов 0–255 }
-      // (Uint8Array нельзя — JSON-сериализация превращает его в {0:…,1:…}).
-      // Биндинг не принимает AbortSignal и на бесплатном тарифе бывает
-      // заядренен очередью: гоним гонку с таймером, чтобы ответ бота не вис.
+      // @cf/openai/whisper-large-v3-turbo: схема turbo — { audio: b64-строка }
+      // (anyOf: string | {body,contentType}), b64 уже готов от tgFileB64, без
+      // конверсий. language: 'ru' — бот русскоязычный, подсказка спасает от
+      // ложного языка (синтетический espeak-сэмпл без подсказки слышался как
+      // польский). Биндинг не принимает AbortSignal и на free-тарифе бывает
+      // заядренен очередью: гонка с таймером — ответ бота не может зависнуть.
       const aiTimeoutMs = opts.aiTimeoutMs || 15000
       const out = await Promise.race([
-        ai.run('@cf/openai/whisper', { audio: Array.from(atob(b64), (c) => c.charCodeAt(0)) }),
+        ai.run('@cf/openai/whisper-large-v3-turbo', { audio: b64, language: 'ru', task: 'transcribe' }),
         new Promise((_, rej) => setTimeout(() => rej(new Error(`таймаут биндинга (>${aiTimeoutMs}мс)`)), aiTimeoutMs)),
       ])
       const text = String(out?.text || '').trim()
       if (text) {
-        debug?.push({ brain: 'workers-ai', model: '@cf/openai/whisper', ok: true })
-        return { text, model: 'workers-ai @cf/openai/whisper' }
+        debug?.push({ brain: 'workers-ai', model: '@cf/openai/whisper-large-v3-turbo', ok: true })
+        return { text, model: 'workers-ai whisper-large-v3-turbo' }
       }
       lastError = 'workers-ai: пустой ответ'
       debug?.push({ brain: 'workers-ai', ok: false, why: 'пустой ответ' })

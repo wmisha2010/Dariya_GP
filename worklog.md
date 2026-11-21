@@ -1327,3 +1327,16 @@ HTML страниц — свежий (вместе с выключателем) 
   15с (opts.aiTimeoutMs)]). Потерял гонку → честное «не расслышала», цепочка идёт
   дальше — ответ бота больше не может зависнуть. /ai-test: ?probe=селектор +
   per-probe ms. Тесты +1 (висит → таймаут → coarena) = 221. VERSION v0.3.32.
+
+## v0.3.33 (2026-11-21) — переключение на whisper-large-v3-turbo
+- Каталог CF: есть отдельная модель @cf/openai/whisper-large-v3-turbo. Её схема
+  входа — { audio: b64-строка (anyOf: string | {body,contentType}) + опции }:
+  audio РОВНО то, что отдаёт tgFileB64, без конверсий. Опции: language, task,
+  vad_filter, beam_size… — у старой @cf/openai/whisper их не было вовсе.
+- brain.js: шаг 0 = ai.run('@cf/openai/whisper-large-v3-turbo', { audio: b64,
+  language: 'ru', task: 'transcribe' }) в гонке с таймером 15с (aiTimeoutMs).
+  language 'ru' — бот русскоязычный; без подсказки синтетический espeak-сэмпл
+  был расслышан как польский. Старый @cf/openai/whisper ушёл из цепочки: три
+  прогона /ai-test?probe=whisperArray по 45с — очередь не отвечает вовсе.
+- /ai-test: проба whisperTurbo (b64 + language ru) вместо whisperArray/TopString.
+- Тест r1: turbo, b64 уходит как есть, language === 'ru'. VERSION v0.3.33.

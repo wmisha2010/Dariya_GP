@@ -1233,11 +1233,10 @@ console.log('── Голосовые: Workers AI whisper (биндинг env.A
     const runs = []
     const aiOk = { run: async (model, input) => { runs.push({ model, input }); return { text: '  Привет Дария  ', word_count: 2 } } }
     const r1 = await transcribeAudio('T2dnUwAC', 'audio/ogg', { aiBinding: aiOk, geminiKey: 'gk' })
-    const aud = runs[0]?.input?.audio
-    check('whisper биндинг: b64 декодирован в {audio: массив байтов}, текст возвращён, цепочка остановилась',
-      r1.text === 'Привет Дария' && String(r1.model).includes('workers-ai')
-      && runs.length === 1 && runs[0].model === '@cf/openai/whisper'
-      && Array.isArray(aud) && aud.length === 6 && aud[0] === 79 && aud[1] === 103) // atob('T2dnUwAC') = «OggS\0\2»
+    check('whisper-turbo: b64 ушло как есть + language ru, текст возвращён, цепочка остановилась',
+      r1.text === 'Привет Дария' && String(r1.model).includes('whisper-large-v3-turbo')
+      && runs.length === 1 && runs[0].model === '@cf/openai/whisper-large-v3-turbo'
+      && runs[0].input.audio === 'T2dnUwAC' && runs[0].input.language === 'ru')
     // без биндинга шаг пропущен — tried без workers-ai, поведение прежнее
     globalThis.fetch = async () => new Response('{"error":"quota"}', { status: 429 })
     const r2 = await transcribeAudio('A'.repeat(100), 'audio/ogg', { coarenaKey: 'k', geminiKey: 'gk' })
