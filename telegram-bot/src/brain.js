@@ -1317,6 +1317,10 @@ export async function askLLM(history, opts = {}) {
     } catch { /* кривой tz — без даты */ }
   }
   if (webContext) system += `\n\n${webContext}`
+  // Свежий контекст группы (v0.3.28): реплики участников «между собой» как фон.
+  // Клеим в system, а не в history — история диалога не засоряется болтовней.
+  const chatter = (opts.groupChatter || '').trim()
+  if (chatter) system += `\n\n${chatter}`
 
   // Coarena — главный мозг: один ключ открывает все модели арены (Claude, GPT,
   // Gemini, Grok…). API OpenAI-совместимый: POST /v1/chat/completions с

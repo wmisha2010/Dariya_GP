@@ -1194,5 +1194,34 @@ console.log('── Чтение страниц целиком: extractPageText 
   }
 }
 
+console.log('── Свежий контекст группы (groupChatter в system) ──')
+{
+  const realFetch = globalThis.fetch
+  const realErr = console.error
+  console.error = () => {}
+  const captured = []
+  globalThis.fetch = async (url, init) => {
+    captured.push({ url: String(url), body: JSON.parse(init.body) })
+    return Response.json({ choices: [{ message: { content: 'Ок' } }] })
+  }
+  try {
+    await askLLM([{ role: 'user', content: 'Дария, что думаете про кинотеатр?' }], {
+      coarenaKey: 'ck',
+      groupChatter: '[Свежий контекст группы — реплики участников за последние минуты, говорили между собой, не с тобой; используй как фон, если он помогает ответу]\nВася: идём в кино вечером\nПетя: а я занят',
+    })
+    const sys = captured[0]?.body?.messages?.[0]?.content || ''
+    check('chatter попал в system-промпт', sys.includes('[Свежий контекст группы') && sys.includes('Вася: идём в кино вечером'))
+    check('история НЕ засорена болтовней (только в system)',
+      captured[0].body.messages.slice(1).every((m) => !(m.content || '').includes('Вася:')))
+    captured.length = 0
+    await askLLM([{ role: 'user', content: 'привет' }], { coarenaKey: 'ck' })
+    check('без chatter маркера в system нет', !(captured[0]?.body?.messages?.[0]?.content || '').includes('[Свежий контекст группы]'))
+  } finally {
+    globalThis.fetch = realFetch
+    console.error = realErr
+    resetCoarenaBreaker()
+  }
+}
+
 console.log(`\nИтого: ${passed} прошло, ${failed} упало`)
 process.exit(failed ? 1 : 0)

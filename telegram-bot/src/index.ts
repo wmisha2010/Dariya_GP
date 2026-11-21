@@ -48,16 +48,58 @@ export interface Env {
   WEB_APP_URL?: string
   WEB_SEARCH?: string
   WEB_PAGE_READ?: string
+  GROUP_CHATTER?: string
   SEARCH_TEST_KEY?: string
 }
 
 const TG_API = 'https://api.telegram.org'
 const DEFAULT_WEB_APP_URL = 'https://preview-chat-d8e654d4-40f5-415b-a16a-09dbc10c3f5d.space-z.ai/'
-const VERSION = 'v0.3.27 (brain v3.6)'
+const VERSION = 'v0.3.28 (brain v3.6)'
 
 /** Контекст диалогов — живёт, пока жив изолят воркера (best-effort, без БД) */
 const chatHistory = new Map<number, Array<{ role: 'user' | 'assistant'; content: string }>>()
 const HISTORY_MAX_TURNS = 8
+
+/** Свежий контекст группы (v0.3.28): реплики участников «между собой» как фон.
+ *  Буфер на каждую группу, ≤15 реплик, живут 10 минут — фон разговора,
+ *  НЕ долговременная память; с privacy mode бота в BotFather не наполнится
+ *  (Telegram не присылает нерелевантные сообщения, флаг inert, но безвреден). */
+const GROUP_CHATTER_MAX = 15
+const GROUP_CHATTER_TTL_MS = 10 * 60 * 1000
+const groupChatter = new Map<number, Array<{ who: string; text: string; t: number }>>()
+
+/** Записать реплику группы (только не адресованные боту сообщения; ботов и команды долой) */
+function recordGroupChatter(chatId: number, msg: any, on: boolean): void {
+  if (!on) return
+  const text = String(msg?.text || '').trim()
+  const from = msg?.from
+  if (!text || !from || from.is_bot || text.startsWith('/')) return
+  const buf = groupChatter.get(chatId) || []
+  const who = String(from.first_name || from.username || 'кто-то').trim().slice(0, 24) || 'кто-то'
+  buf.push({ who, text: text.slice(0, 200), t: Date.now() })
+  while (buf.length > GROUP_CHATTER_MAX) buf.shift()
+  groupChatter.set(chatId, buf)
+  if (groupChatter.size > 50) {
+    // чатов стало слишком много — выкидываем самые старые буферы целиком
+    const oldest = [...groupChatter.entries()]
+      .sort((a, b) => (a[1][0]?.t || 0) - (b[1][0]?.t || 0))
+      .slice(0, groupChatter.size - 50)
+    for (const [id] of oldest) groupChatter.delete(id)
+  }
+}
+
+/** Блок «свежий контекст группы» для промпта; протухшее подчистим. '' если тишина. */
+function buildGroupContext(chatId: number, on: boolean): string {
+  if (!on) return ''
+  const fresh = (groupChatter.get(chatId) || []).filter((m) => Date.now() - m.t < GROUP_CHATTER_TTL_MS)
+  if (fresh.length) groupChatter.set(chatId, fresh)
+  else groupChatter.delete(chatId)
+  if (!fresh.length) return ''
+  return [
+    '[Свежий контекст группы — реплики участников за последние минуты, говорили между собой, не с тобой; используй как фон, если он помогает ответу]',
+    ...fresh.map((m) => `${m.who}: ${m.text}`),
+  ].join('\n')
+}
 
 /** Дедупликация апдейтов: Telegram дёргает вебхук повторно, если мы долго отвечаем */
 const processedUpdates = new Set<number>()
@@ -171,6 +213,7 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
   const isPrivate = msg.chat?.type === 'private'
   const chatId: number = msg.chat?.id
   const token = env.TELEGRAM_BOT_TOKEN
+  const chatterOn = (env.GROUP_CHATTER || '') !== 'off'
 
   // Вырезаем @упоминание бота — остаётся «команда»
   const withoutMention = text.replace(/@\w+/g, ' ')
@@ -184,7 +227,11 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
     const replyToBot = !!cachedBotId && msg.reply_to_message?.from?.id === cachedBotId
     if (found) command = cmd
     else if (replyToBot) command = withoutMention.trim()
-    else return // не к нам обращение — молчим
+    else {
+      // не к нам обращение — но в группе это фон разговора: запоминаем как свежий контекст
+      recordGroupChatter(chatId, msg, chatterOn)
+      return
+    }
   }
   // Голое фото без подписи — дефолтный вопрос
   if (isPhoto && !command) command = 'Что на этом фото? Опиши подробно и живо.'
@@ -292,6 +339,7 @@ async function handleMessage(msg: any, env: Env): Promise<void> {
     geminiBaseUrl: env.GEMINI_BASE_URL || '',
     geminiModel: env.GEMINI_MODEL || '',
     webContext,
+    groupChatter: buildGroupContext(chatId, chatterOn),
     tz,
     photo: photo || undefined,
   })
