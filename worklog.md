@@ -1391,3 +1391,15 @@ HTML страниц — свежий (вместе с выключателем) 
   без биндинга, таймаут гонки). Урок среды: после переработки песочницы
   node_modules частично потерялся (tsc: TS2688 @cloudflare/workers-types) —
   npm install вернул. VERSION v0.3.35, бандл 135.97 KiB.
+
+- ИТОГ v0.3.36 (fe8c71f в проде): проба Coarena /audio/speech → 404 «There is no
+  Model API endpoint» — прокси отдаёт только chat/completions. Стек полностью
+  просмотрен: Workers AI (aura=en/es/nl/fr/de/it/ja, melotts deprecated),
+  Coarena (нет TTS), OpenRouter (нет TTS), Gemini (ключ мёртв) = РУССКОГО TTS
+  НЕТ НИГДЕ. Голосовые ответы в коде ГОТОВЫ и лежат за флагом VOICE_MIRROR=false:
+  speakText (aura-1, 468мс, opus/ogg), sendVoice, зеркало «голос на голос» с
+  откатом на текст, статус record_voice, /tts-test round-trip. Включение в одну
+  строку, как только: (а) в Workers AI появится ru-модель, или (б) владелец даст
+  любой OpenAI-совместимый TTS-ключ (OpenAI tts-1 / ElevenLabs — русский отличный).
+  Сэмпл aura-1 оставлен в download/daria-voice-sample.ogg — слышно, как англ. голос
+  бормочет кириллицу.
